@@ -296,7 +296,8 @@ def cover(url: str, platform: str = ""):
 
 # ---------------- 配置 ----------------
 
-SENSITIVE = ("bilibili_cookie", "douyin_cookie", "kuaishou_cookie", "xiaohongshu_cookie")
+SENSITIVE = ("bilibili_cookie", "douyin_cookie", "kuaishou_cookie",
+             "xiaohongshu_cookie", "ai_api_key")
 
 
 @app.get("/api/config")
@@ -406,6 +407,70 @@ def check_sub(sid: int):
     except Exception as e:
         raise HTTPException(502, str(e)[:200])
     return {"ok": True, "new_count": n}
+
+
+# ---------------- 搬运工作台 ----------------
+
+@app.get("/api/repost/status")
+def repost_status():
+    from . import ai
+    return {"ai_ready": ai.ai_ready(),
+            "model": config.get("ai_model") or ai.DEFAULT_MODEL}
+
+
+@app.get("/api/repost/videos")
+def repost_videos(keyword: str = "", limit: int = 50):
+    rows, _ = database.history(status="done", keyword=keyword, page=1, size=limit)
+    return {"items": [{"id": r["id"], "title": r["title"], "author": r["author"],
+                       "platform": r["platform"], "file_path": r["file_path"],
+                       "description": r.get("description") or "",
+                       "cover_url": r["cover_url"]} for r in rows]}
+
+
+@app.post("/api/repost/generate")
+async def repost_generate(req: Request):
+    from . import ai
+    body = await req.json()
+    vid = body.get("video_id")
+    v = database.get_video(vid) if vid else None
+    if not v:
+        raise HTTPException(404, "视频不存在")
+    try:
+        result = ai.rewrite_copy(v, style=body.get("style") or "natural",
+                                 credit=bool(body.get("credit", True)))
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"AI 生成失败：{str(e)[:150]}")
+    rid = database.insert_repost({
+        "video_id": vid, "style": body.get("style") or "natural",
+        "credit": 1 if body.get("credit", True) else 0,
+        "new_title": result["title"], "new_desc": result["description"],
+        "tags": json.dumps(result["tags"], ensure_ascii=False),
+    })
+    return {"id": rid, "video_id": vid, **result}
+
+
+@app.get("/api/repost/list")
+def repost_list(video_id: int | None = None):
+    rows = database.list_reposts(video_id)
+    for r in rows:
+        r["tags"] = json.loads(r.get("tags") or "[]")
+    return {"items": rows}
+
+
+@app.post("/api/repost/{rid}/save")
+async def repost_save(rid: int, req: Request):
+    """用户手动编辑后的文案保存回历史记录。"""
+    body = await req.json()
+    row = database.query_one("SELECT * FROM reposts WHERE id=?", (rid,))
+    if not row:
+        raise HTTPException(404, "记录不存在")
+    database.execute(
+        "UPDATE reposts SET new_title=?, new_desc=?, tags=? WHERE id=?",
+        (body.get("title") or "", body.get("description") or "",
+         json.dumps(body.get("tags") or []), rid))
+    return {"ok": True}
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

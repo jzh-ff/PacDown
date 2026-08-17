@@ -63,6 +63,18 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     created_at TEXT NOT NULL,
     UNIQUE(platform, uploader_id)
 );
+
+CREATE TABLE IF NOT EXISTS reposts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id INTEGER NOT NULL,
+    style TEXT DEFAULT 'natural',
+    credit INTEGER DEFAULT 1,
+    new_title TEXT DEFAULT '',
+    new_desc TEXT DEFAULT '',
+    tags TEXT DEFAULT '[]',            -- JSON 数组
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reposts_video ON reposts(video_id);
 """
 
 _conn: sqlite3.Connection | None = None
@@ -227,3 +239,20 @@ def update_sub(sid: int, **fields) -> None:
 
 def delete_sub(sid: int) -> None:
     execute("DELETE FROM subscriptions WHERE id=?", (sid,))
+
+
+# ---------------- reposts（搬运文案） ----------------
+
+def insert_repost(r: dict) -> int:
+    r = {**r, "created_at": now()}
+    cols = ",".join(r.keys())
+    marks = ",".join(["?"] * len(r))
+    cur = execute(f"INSERT INTO reposts({cols}) VALUES({marks})", tuple(r.values()))
+    return cur.lastrowid
+
+
+def list_reposts(video_id: int | None = None, limit: int = 30) -> list[dict]:
+    if video_id:
+        return query("SELECT * FROM reposts WHERE video_id=? ORDER BY id DESC LIMIT ?",
+                     (video_id, limit))
+    return query("SELECT * FROM reposts ORDER BY id DESC LIMIT ?", (limit,))

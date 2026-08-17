@@ -91,6 +91,7 @@ $("#nav").addEventListener("click", (e) => {
   if (btn.dataset.page === "history") loadHistory();
   if (btn.dataset.page === "subs") loadSubs();
   if (btn.dataset.page === "settings") loadSettings();
+  if (btn.dataset.page === "repost") loadRepost();
 });
 
 /* ---------- 下载页 ---------- */
@@ -736,6 +737,174 @@ window.removeSub = async (id) => {
   catch (e) { toast(e.message, "err"); }
 };
 
+/* ---------- 搬运工作台 ---------- */
+
+let repostSel = null;    // 当前选中视频
+let repostTags = [];     // 可编辑标签
+let currentRepostId = 0;
+
+async function loadRepost() {
+  try {
+    const st = await api("/api/repost/status");
+    $("#ai-notice").hidden = !!st.ai_ready;
+  } catch (e) { /* 忽略 */ }
+  loadRepostVideos("");
+  loadRepostHistory();
+}
+
+async function loadRepostVideos(keyword) {
+  const box = $("#repost-video-list");
+  try {
+    const { items } = await api(`/api/repost/videos?keyword=${encodeURIComponent(keyword)}`);
+    if (!items.length) {
+      box.innerHTML = `<div class="empty" style="padding:26px 10px"><p>${keyword ? "没有匹配的视频" : "还没有已完成的下载"}</p></div>`;
+      return;
+    }
+    box.innerHTML = items.map((v) => `
+      <div class="rp-item ${repostSel?.id === v.id ? "sel" : ""}" data-vid="${v.id}">
+        <img class="rp-thumb" src="${v.cover_url ? esc(coverSrc(v.cover_url, v.platform)) : ""}"
+             onerror="this.style.visibility='hidden'">
+        <div class="rp-info">
+          <div class="rp-title">${esc(v.title || "(无标题)")}</div>
+          <div class="rp-meta">${PLATFORM_NAME[v.platform] || v.platform} · ${esc(v.author || "")}</div>
+        </div>
+      </div>`).join("");
+  } catch (e) {
+    box.innerHTML = `<div class="empty" style="padding:26px 10px"><p>${esc(e.message)}</p></div>`;
+  }
+}
+
+$("#repost-search").addEventListener("input", (e) => {
+  clearTimeout($("#repost-search")._t);
+  $("#repost-search")._t = setTimeout(() => loadRepostVideos(e.target.value.trim()), 350);
+});
+
+$("#repost-video-list").addEventListener("click", async (e) => {
+  const item = e.target.closest(".rp-item");
+  if (!item) return;
+  const vid = +item.dataset.vid;
+  $$(".rp-item").forEach((el) => el.classList.toggle("sel", el === item));
+  try {
+    const v = await api(`/api/history/${vid}`);
+    repostSel = v;
+    $("#repost-empty").hidden = true;
+    $("#repost-video-card").hidden = false;
+    $("#repost-gen").hidden = false;
+    $("#repost-video-card").innerHTML = `
+      <div class="rv-title">${esc(v.title)}</div>
+      <div class="h-meta" style="margin-top:6px">${badge(v.platform)}
+        <span>${esc(v.author)}</span>${statusBadge(v.status)}</div>
+      ${v.description ? `<div class="rv-desc">${esc(v.description)}</div>` : ""}`;
+    $("#gen-result").hidden = true;
+  } catch (err) { toast(err.message, "err"); }
+});
+
+$("#btn-generate").addEventListener("click", async () => {
+  if (!repostSel) return;
+  const btn = $("#btn-generate");
+  btn.disabled = true;
+  btn.innerHTML = "AI 生成中…";
+  try {
+    const r = await api("/api/repost/generate", {
+      method: "POST",
+      body: { video_id: repostSel.id, style: $("#gen-style").value,
+              credit: $("#gen-credit").checked },
+    });
+    currentRepostId = r.id;
+    $("#gen-title").value = r.title;
+    $("#gen-desc").value = r.description;
+    repostTags = r.tags || [];
+    renderTags();
+    $("#gen-result").hidden = false;
+    loadRepostHistory();
+  } catch (e) { toast(e.message, "err", 5000); }
+  finally { btn.disabled = false; btn.innerHTML = "AI 生成文案"; }
+});
+
+function renderTags() {
+  const box = $("#gen-tags");
+  box.innerHTML = repostTags.map((t, i) =>
+    `<span class="tag-chip">#${esc(t)}<span class="tag-x" data-i="${i}">✕</span></span>`).join("") +
+    `<button class="tag-add" id="tag-add">+ 标签</button>`;
+}
+
+$("#gen-tags").addEventListener("click", (e) => {
+  const x = e.target.closest(".tag-x");
+  if (x) { repostTags.splice(+x.dataset.i, 1); renderTags(); return; }
+  if (e.target.id === "tag-add") {
+    const t = prompt("新标签（不用带 #）");
+    if (t && t.trim()) { repostTags.push(t.trim()); renderTags(); }
+  }
+});
+
+$("#btn-copy-desc").addEventListener("click", async () => {
+  const text = `${$("#gen-title").value}\n\n${$("#gen-desc").value}\n\n${repostTags.map((t) => "#" + t).join(" ")}`;
+  try {
+    await navigator.clipboard.writeText(text.trim());
+    toast("文案已复制到剪贴板");
+  } catch (e) {
+    // 非安全上下文回退
+    const ta = document.createElement("textarea");
+    ta.value = text.trim();
+    document.body.appendChild(ta); ta.select();
+    document.execCommand("copy"); ta.remove();
+    toast("文案已复制");
+  }
+});
+
+$("#btn-save-repost").addEventListener("click", async () => {
+  if (!currentRepostId) return;
+  try {
+    await api(`/api/repost/${currentRepostId}/save`, {
+      method: "POST",
+      body: { title: $("#gen-title").value,
+              description: $("#gen-desc").value, tags: repostTags },
+    });
+    const tip = $("#gen-saved-tip");
+    tip.textContent = "已保存 ✓"; tip.classList.add("show");
+    setTimeout(() => tip.classList.remove("show"), 2000);
+    loadRepostHistory();
+  } catch (e) { toast(e.message, "err"); }
+});
+
+$("#btn-open-folder").addEventListener("click", async () => {
+  if (!repostSel) return;
+  try { await api(`/api/history/${repostSel.id}/open`, { method: "POST" }); }
+  catch (e) { toast(e.message, "err"); }
+});
+
+async function loadRepostHistory() {
+  const box = $("#repost-history");
+  try {
+    const { items } = await api("/api/repost/list");
+    if (!items.length) {
+      box.innerHTML = `<div class="empty"><p>还没有生成记录</p></div>`;
+      return;
+    }
+    box.innerHTML = items.map((r) => `
+      <div class="rh-item">
+        <span class="rh-title">${esc(r.new_title)}</span>
+        <span class="rh-desc">${esc(r.new_desc.replace(/\\n/g, " "))}</span>
+        <span class="rh-time num">${(r.created_at || "").slice(5, 16)}</span>
+        <button class="btn btn-ghost btn-sm rh-copy" data-cid="${r.id}">复制</button>
+      </div>`).join("");
+  } catch (e) { box.innerHTML = ""; }
+}
+
+$("#repost-history").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".rh-copy");
+  if (!btn) return;
+  try {
+    const { items } = await api(`/api/repost/list?video_id=`);
+    const row = items.find((r) => r.id === +btn.dataset.cid);
+    if (row) {
+      await navigator.clipboard.writeText(
+        `${row.new_title}\n\n${row.new_desc}\n\n${row.tags.map((t) => "#" + t).join(" ")}`);
+      toast("已复制该条文案");
+    }
+  } catch (err) { toast("复制失败", "err"); }
+});
+
 /* ---------- 设置页 ---------- */
 
 const COOKIE_FIELDS = [
@@ -743,6 +912,7 @@ const COOKIE_FIELDS = [
   ["set-dy-cookie", "douyin_cookie"],
   ["set-ks-cookie", "kuaishou_cookie"],
   ["set-xhs-cookie", "xiaohongshu_cookie"],
+  ["set-ai-key", "ai_api_key"],
 ];
 
 async function loadSettings() {
@@ -753,10 +923,12 @@ async function loadSettings() {
     $("#set-quality").value = cfg.default_quality;
     $("#set-sub-interval").value = cfg.subscription_interval;
     $("#set-proxy").value = cfg.http_proxy || "";
+    $("#set-ai-url").value = cfg.ai_base_url || "";
+    $("#set-ai-model").value = cfg.ai_model || "";
     COOKIE_FIELDS.forEach(([id, key]) => {
       const input = $(`#${id}`);
       input.value = "";
-      input.placeholder = cfg[key] === "__SET__" ? "已配置（留空保持不变）" : input.dataset.ph || input.placeholder;
+      input.placeholder = cfg[key] === "__SET__" ? "已配置（留空保持不变）" : input.placeholder;
       input.dataset.set = cfg[key] === "__SET__" ? "1" : "";
     });
   } catch (e) { toast(e.message, "err"); }
@@ -769,6 +941,8 @@ $("#btn-save-settings").addEventListener("click", async () => {
     default_quality: $("#set-quality").value.trim() || "best",
     subscription_interval: +$("#set-sub-interval").value || 30,
     http_proxy: $("#set-proxy").value.trim(),
+    ai_base_url: $("#set-ai-url").value.trim(),
+    ai_model: $("#set-ai-model").value.trim(),
   };
   COOKIE_FIELDS.forEach(([id, key]) => {
     const input = $(`#${id}`);

@@ -25,6 +25,9 @@ DEFAULTS = {
     "extract_audio": False,         # 默认是否提取 MP3
     "download_danmaku": False,      # B站默认是否下载弹幕
     "subscription_interval": 30,    # 订阅检查间隔（分钟）
+    "ai_base_url": "https://open.bigmodel.cn/api/paas/v4",  # OpenAI 兼容端点
+    "ai_api_key": "",
+    "ai_model": "glm-4-flash",
     "port": 8300,
     "theme": "dark",
 }

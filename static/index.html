@@ -31,6 +31,10 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 12l4.5-2.5M12 3v2m9 7h-2M12 21v-2M3 12h2" opacity=".9"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg>
       <span>订阅</span>
     </button>
+    <button class="nav-item" data-page="repost">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7"/><path d="M12 15V3m0 0L7.5 7.5M12 3l4.5 4.5"/></svg>
+      <span>搬运</span>
+    </button>
     <button class="nav-item" data-page="settings">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2L14.2 3H9.8l-.4 2.7a7 7 0 0 0-2 1.2l-2.3-1-2 3.4 2 1.5A7 7 0 0 0 5 12a7 7 0 0 0 .1 1.2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2 1.2l.4 2.7h4.4l.4-2.7a7 7 0 0 0 2-1.2l2.3 1 2-3.4-2-1.5A7 7 0 0 0 19 12z"/></svg>
       <span>设置</span>
@@ -148,6 +152,82 @@
     <div id="sub-list" class="sub-list"></div>
   </section>
 
+  <!-- ============ 搬运页 ============ -->
+  <section class="page" id="page-repost">
+    <header class="page-head">
+      <h1>搬运工作台</h1>
+      <p class="sub">AI 改写文案 · 标注原作者 · 打包导出，手动发布更安全</p>
+    </header>
+
+    <div class="notice glass" id="ai-notice" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5m0 3h.01"/></svg>
+      <span>尚未配置 AI：请到「设置 → AI 文案」填写 API Key（支持智谱 / DeepSeek / OpenAI 等兼容接口）后即可生成文案</span>
+    </div>
+
+    <div class="repost-layout">
+      <div class="glass repost-picker">
+        <div class="search-box" style="max-width:none">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          <input id="repost-search" placeholder="搜索要搬运的视频">
+        </div>
+        <div id="repost-video-list" class="repost-video-list"></div>
+      </div>
+
+      <div class="repost-work">
+        <div class="glass repost-video-card" id="repost-video-card" hidden></div>
+
+        <div class="glass repost-gen" id="repost-gen" hidden>
+          <div class="gen-opts">
+            <label class="field-inline">文案风格
+              <select id="gen-style" class="select">
+                <option value="natural">自然口语</option>
+                <option value="viral">爆款吸睛</option>
+                <option value="concise">精简两句话</option>
+                <option value="story">讲故事</option>
+              </select>
+            </label>
+            <label class="opt-chip" title="在文案末尾注明原作者与来源平台">
+              <input type="checkbox" id="gen-credit" checked><span>标注原作者</span>
+            </label>
+            <button class="btn btn-primary" id="btn-generate">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.3 5.7L21 12l-5.7 2.3L13 20l-2.3-5.7L5 12l5.7-2.3z"/></svg>
+              AI 生成文案
+            </button>
+          </div>
+
+          <div id="gen-result" hidden>
+            <div class="field">
+              <label>新标题</label>
+              <input id="gen-title">
+            </div>
+            <div class="field">
+              <label>新文案（可编辑）</label>
+              <textarea id="gen-desc" rows="6"></textarea>
+            </div>
+            <div class="field">
+              <label>标签</label>
+              <div id="gen-tags" class="tag-editor"></div>
+            </div>
+            <div class="gen-actions">
+              <button class="btn btn-primary" id="btn-copy-desc">复制文案</button>
+              <button class="btn btn-ghost" id="btn-save-repost">保存修改</button>
+              <button class="btn btn-ghost" id="btn-open-folder">打开视频文件夹</button>
+              <span id="gen-saved-tip" class="saved-tip"></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="empty" id="repost-empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7M12 15V3m0 0L7.5 7.5M12 3l4.5 4.5"/></svg>
+          <p>从左侧选择一个已下载的视频开始搬运准备<br>发布前请确认已获得原作者授权</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-head"><h2>生成历史</h2></div>
+    <div id="repost-history" class="repost-history"></div>
+  </section>
+
   <!-- ============ 设置页 ============ -->
   <section class="page" id="page-settings">
     <header class="page-head">
@@ -202,6 +282,22 @@
           <input id="set-xhs-cookie" placeholder="小红书解析通常必须配置" autocomplete="off">
         </div>
         <p class="hint">Cookie 仅保存在本机 config.json，用于身份验证，不会上传</p>
+      </form>
+      <form class="glass setting-group" id="form-ai">
+        <h3>AI 文案 <span class="tag">搬运工作台</span></h3>
+        <div class="field">
+          <label>API 地址（OpenAI 兼容）</label>
+          <input id="set-ai-url" placeholder="https://open.bigmodel.cn/api/paas/v4">
+          <p class="hint">智谱填默认值；DeepSeek 填 https://api.deepseek.com；OpenAI 填 https://api.openai.com/v1</p>
+        </div>
+        <div class="field">
+          <label>API Key</label>
+          <input id="set-ai-key" placeholder="sk-..." autocomplete="off">
+        </div>
+        <div class="field">
+          <label>模型</label>
+          <input id="set-ai-model" placeholder="glm-4-flash（免费）/ deepseek-chat / gpt-4o-mini">
+        </div>
       </form>
     </div>
     <div class="settings-save">
