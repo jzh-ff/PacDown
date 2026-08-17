@@ -32,42 +32,25 @@ class DownloadManager:
         return self._info_to_dict(parser, info)
 
     def create_task(self, url: str, options: dict, force: bool = False) -> dict:
-        """解析 + 去重检查 + 入库 pending，返回 {id, duplicate, existing_id, info}。"""
-        parser = dispatch(url)
-        info = parser.parse(url)
-        info.raw["_images"] = info.images       # 入库后 download 阶段需要
-        info.raw["_is_images"] = info.is_images
-        if not force and info.video_id:
-            existing = database.find_by_video_id(info.platform, info.video_id)
-            if existing and existing["status"] in ("done", "downloading", "pending", "processing"):
-                return {"duplicate": True, "existing": existing,
-                        "info": self._info_to_dict(parser, info)}
+        """立即入库（parsing 状态），解析由 worker 后台完成——点击下载零等待。"""
+        from .parsers import guess_platform
+        options = dict(options)
+        options["_force"] = bool(force)
         vid = database.insert_video({
-            "platform": info.platform,
-            "video_id": info.video_id,
+            "platform": guess_platform(url) or "generic",
             "source_url": url,
-            "title": info.title,
-            "description": info.description,
-            "author": info.author,
-            "author_id": info.author_id,
-            "avatar_url": info.avatar_url,
-            "cover_url": info.cover_url,
-            "duration": info.duration,
-            "publish_time": info.publish_time,
-            "stats": json.dumps(info.stats, ensure_ascii=False),
-            "quality": options.get("quality") or config.get("default_quality", "best"),
-            "raw_json": json.dumps(info.raw, ensure_ascii=False, default=str),
-            "status": "pending",
+            "status": "parsing",
             "options": json.dumps(options, ensure_ascii=False),
         })
         self._wake.set()
-        return {"duplicate": False, "id": vid,
-                "info": self._info_to_dict(parser, info)}
+        return {"duplicate": False, "id": vid}
 
     def retry(self, vid: int) -> bool:
         v = database.get_video(vid)
         if v and v["status"] == "failed":
-            database.update_video(vid, status="pending", progress=0, error="")
+            # 解析阶段失败的回到 parsing；下载阶段失败的直接重下
+            new_status = "parsing" if not v.get("video_id") else "pending"
+            database.update_video(vid, status=new_status, progress=0, error="", speed="")
             self._wake.set()
             return True
         return False
@@ -88,6 +71,24 @@ class DownloadManager:
 
     def _worker(self):
         while not self._stop.is_set():
+            # 优先处理待解析任务（parsing → pending）
+            task = database.query_one(
+                "SELECT * FROM videos WHERE status='parsing' ORDER BY id LIMIT 1")
+            if task:
+                try:
+                    task = self._parse_stage(task)
+                except Exception as e:
+                    database.update_video(task["id"], status="failed",
+                                          error=str(e)[:500], speed="")
+                    task = None
+                if task:
+                    try:
+                        self._run(task)
+                    except Exception as e:
+                        database.update_video(task["id"], status="failed",
+                                              error=str(e)[:500], speed="")
+                continue
+            # 再取已就绪的下载任务
             task = database.query_one(
                 "SELECT * FROM videos WHERE status='pending' ORDER BY id LIMIT 1")
             if not task:
@@ -101,6 +102,42 @@ class DownloadManager:
                                       error=str(e)[:500], speed="")
             # 给其他 worker 抢任务的机会
             time.sleep(0.1)
+
+    def _parse_stage(self, task: dict) -> dict | None:
+        """后台解析：拉取元数据、去重检查，成功则更新记录并返回（状态 pending）。"""
+        vid = task["id"]
+        options = json.loads(task["options"] or "{}")
+        force = bool(options.pop("_force", False))
+        database.update_video(vid, options=json.dumps(options, ensure_ascii=False))
+
+        parser = dispatch(task["source_url"])
+        info = parser.parse(task["source_url"])
+        info.raw["_images"] = info.images
+        info.raw["_is_images"] = info.is_images
+
+        if not force and info.video_id:
+            existing = database.find_by_video_id(info.platform, info.video_id)
+            if existing and existing["id"] != vid and existing["status"] in (
+                    "done", "downloading", "pending", "processing"):
+                database.update_video(
+                    vid, status="duplicate", platform=info.platform,
+                    video_id=info.video_id, title=info.title, author=info.author,
+                    cover_url=info.cover_url,
+                    error=f"已于 {existing['downloaded_at'][:16]} 下载过（历史记录 #{existing['id']}）")
+                return None
+
+        database.update_video(
+            vid,
+            platform=info.platform, video_id=info.video_id, title=info.title,
+            description=info.description, author=info.author,
+            author_id=info.author_id, avatar_url=info.avatar_url,
+            cover_url=info.cover_url, duration=info.duration,
+            publish_time=info.publish_time,
+            stats=json.dumps(info.stats, ensure_ascii=False),
+            quality=options.get("quality") or config.get("default_quality", "best"),
+            raw_json=json.dumps(info.raw, ensure_ascii=False, default=str),
+            status="pending", progress=0)
+        return database.get_video(vid)
 
     def _run(self, task: dict):
         vid = task["id"]

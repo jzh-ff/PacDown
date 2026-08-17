@@ -85,13 +85,7 @@ async def download(req: Request):
     for u in urls[:50]:
         try:
             r = manager.create_task(u, options, force=force)
-            if r["duplicate"]:
-                results.append({"url": u, "status": "duplicate",
-                                "existing_id": r["existing"]["id"],
-                                "title": r["existing"]["title"]})
-            else:
-                results.append({"url": u, "status": "created", "id": r["id"],
-                                "info": r["info"]})
+            results.append({"url": u, "status": "queued", "id": r["id"]})
         except Exception as e:
             results.append({"url": u, "status": "failed", "error": str(e)[:200]})
     return {"results": results}
@@ -109,10 +103,23 @@ def retry_task(vid: int):
     return {"ok": True}
 
 
+@app.delete("/api/tasks/{vid}")
+def dismiss_task(vid: int):
+    """清理 duplicate 提示记录（前端展示后调用）。"""
+    v = database.get_video(vid)
+    if not v:
+        raise HTTPException(404, "任务不存在")
+    if v["status"] not in ("duplicate", "failed"):
+        raise HTTPException(400, "仅提示类任务可移除")
+    database.delete_video(vid)
+    return {"ok": True}
+
+
 def _task_view(t: dict) -> dict:
     return {k: t[k] for k in (
         "id", "platform", "title", "author", "cover_url", "status",
-        "progress", "speed", "error", "file_path", "duration")}
+        "progress", "speed", "error", "file_path", "duration",
+        "created_at", "downloaded_at")}
 
 
 # ---------------- 历史 ----------------

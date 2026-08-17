@@ -209,66 +209,142 @@ $("#btn-download-selected").addEventListener("click", async () => {
     download_danmaku: $("#opt-danmaku").checked,
     fetch_comments: $("#opt-comments").checked,
   };
+  const btn = $("#btn-download-selected");
+  btn.disabled = true;
   try {
     const { results } = await api("/api/download", { method: "POST", body: { text, options } });
-    const created = results.filter((r) => r.status === "created").length;
-    const dup = results.filter((r) => r.status === "duplicate").length;
+    const queued = results.filter((r) => r.status === "queued").length;
     const failed = results.filter((r) => r.status === "failed").length;
-    if (created) toast(`已加入下载队列：${created} 个`);
-    if (dup) toast(`${dup} 个视频已下载过，可在历史中查看`, "warn");
-    if (failed) toast(`${failed} 个创建失败`, "err");
+    if (queued) toast(`已加入队列：${queued} 个任务，解析完成后自动开始下载`);
+    if (failed) toast(`${failed} 个任务创建失败`, "err");
     $("#parse-results").hidden = true;
     pollTasks(true);
   } catch (e) { toast(e.message, "err"); }
+  finally { btn.disabled = false; }
 });
 
-/* ---------- 任务轮询 ---------- */
+/* ---------- 任务轮询（增量渲染：节点复用，进度平滑） ---------- */
 
-let lastTaskIds = new Set();
+const doneNotified = new Set();   // 已 toast 过完成提示的任务
+const dupTimers = new Map();      // duplicate 提示的自动清理定时器
 
-function taskSummaryHTML(tasks) {
-  if (!tasks.length) return "";
-  const active = tasks.filter((t) => ["downloading", "processing", "parsing"].includes(t.status)).length;
-  const done = tasks.filter((t) => t.status === "done").length;
-  const failed = tasks.filter((t) => t.status === "failed").length;
-  return `<span class="num">${active} 进行中 · ${done} 完成${failed ? ` · <span style="color:var(--err)">${failed} 失败</span>` : ""}</span>`;
+function buildTaskEl(t) {
+  const el = document.createElement("div");
+  el.className = "task-item";
+  el.dataset.id = t.id;
+  el.innerHTML = `
+    <div class="task-top">
+      <span data-f="badge"></span>
+      <span class="task-title" data-f="title"></span>
+      <span class="task-author" data-f="author"></span>
+      <span class="task-speed num" data-f="speed"></span>
+      <span data-f="status"></span>
+      <button class="btn btn-ghost btn-sm" data-f="retry" hidden onclick="retryTask(${t.id})">重试</button>
+    </div>
+    <div class="progress" data-f="progressWrap">
+      <div class="progress-bar" data-f="bar"></div>
+    </div>
+    <div class="task-err" data-f="err" hidden></div>`;
+  el.querySelector('[data-f="retry"]').hidden = true;
+  updateTaskEl(el, t, true);
+  return el;
+}
+
+function updateTaskEl(el, t, fresh = false) {
+  const q = (f) => el.querySelector(`[data-f="${f}"]`);
+  const setText = (f, val) => {
+    const node = q(f);
+    const v = val || "";
+    if (node.textContent !== v) node.textContent = v;
+  };
+  setText("title", t.title || t.file_path || "正在解析…");
+  setText("author", t.author);
+  setText("speed", t.status === "downloading" ? (t.speed || "") : "");
+  const badgeEl = q("badge");
+  const badgeHtml = badge(t.platform);
+  if (badgeEl.dataset.p !== t.platform) { badgeEl.innerHTML = badgeHtml; badgeEl.dataset.p = t.platform; }
+  const stEl = q("status");
+  const stHtml = statusBadge(t.status);
+  if (stEl.dataset.s !== t.status) { stEl.innerHTML = stHtml; stEl.dataset.s = t.status; }
+
+  const wrap = q("progressWrap");
+  const bar = q("bar");
+  wrap.className = "progress" + (t.status === "done" ? " ok" : t.status === "failed" ? " err" : "");
+  if (t.status === "parsing") {
+    bar.className = "progress-bar indeterminate";
+  } else if (t.status === "pending") {
+    bar.className = "progress-bar";
+    bar.style.width = "0%";
+  } else if (t.status === "downloading" || t.status === "processing") {
+    bar.className = "progress-bar striped";
+    bar.style.width = `${t.status === "processing" ? 99 : (t.progress || 0)}%`;
+  } else if (t.status === "done") {
+    bar.className = "progress-bar";
+    bar.style.width = "100%";
+  } else if (t.status === "duplicate") {
+    bar.className = "progress-bar";
+    bar.style.width = "100%";
+  }
+
+  const errEl = q("err");
+  const errText = t.error || "";
+  if (errText) { errEl.textContent = errText; errEl.hidden = false; }
+  else errEl.hidden = true;
+  q("retry").hidden = t.status !== "failed";
+
+  if (t.status === "done" && !doneNotified.has(t.id)) {
+    doneNotified.add(t.id);
+    toast(`《${(t.title || "视频").slice(0, 30)}》下载完成`, "ok");
+    if ($("#page-history").classList.contains("active")) loadHistory();
+  }
+  // duplicate 提示：8 秒后自动清理
+  if (t.status === "duplicate" && !dupTimers.has(t.id)) {
+    dupTimers.set(t.id, setTimeout(async () => {
+      try { await api(`/api/tasks/${t.id}`, { method: "DELETE" }); } catch (e) { /* 忽略 */ }
+      const node = document.querySelector(`.task-item[data-id="${t.id}"]`);
+      if (node) { node.classList.add("task-out"); setTimeout(() => node.remove(), 400); }
+      pollTasks();
+    }, 8000));
+  }
+}
+
+function renderTasks(tasks) {
+  const list = $("#task-list");
+  const existing = new Map([...list.children].map((el) => [String(el.dataset.id), el]));
+  const seen = new Set();
+  for (const t of tasks) {
+    seen.add(String(t.id));
+    let el = existing.get(String(t.id));
+    if (el) { updateTaskEl(el, t); }
+    else { list.appendChild(buildTaskEl(t)); }
+  }
+  // 消失的任务：平滑淡出
+  existing.forEach((el, id) => {
+    if (!seen.has(id) && !el.classList.contains("task-out")) {
+      el.classList.add("task-out");
+      setTimeout(() => el.remove(), 450);
+    }
+  });
 }
 
 async function pollTasks(force = false) {
   try {
     const { tasks } = await api("/api/tasks");
-    const hasActive = tasks.length > 0;
-    const head = $("#tasks-head");
-    head.hidden = !hasActive;
-    if (!hasActive) {
+    const hasVisible = tasks.length > 0;
+    $("#tasks-head").hidden = !hasVisible;
+    if (!hasVisible) {
       $("#task-list").innerHTML = "";
-      if (lastTaskIds.size) { // 队列刚清空：刷新历史统计
-        lastTaskIds.clear();
-        if ($("#page-history").classList.contains("active")) loadHistory();
-      }
       return;
     }
-    $("#task-summary").innerHTML = taskSummaryHTML(tasks);
-    $("#task-list").innerHTML = tasks.map((t) => {
-      const pct = t.status === "pending" ? 0 : t.progress || 0;
-      const barCls = t.status === "pending" ? "indeterminate"
-        : t.status === "downloading" ? "striped"
-        : t.status === "processing" ? "striped" : "";
-      const progCls = t.status === "done" ? "ok" : t.status === "failed" ? "err" : "";
-      return `<div class="task-item">
-        <div class="task-top">
-          ${badge(t.platform)}
-          <span class="task-title">${esc(t.title || t.file_path || "…")}</span>
-          ${t.author ? `<span class="task-author">${esc(t.author)}</span>` : ""}
-          ${t.status === "downloading" && t.speed ? `<span class="task-speed num">${esc(t.speed)}</span>` : ""}
-          ${statusBadge(t.status)}
-          ${t.status === "failed" ? `<button class="btn btn-ghost btn-sm" onclick="retryTask(${t.id})">重试</button>` : ""}
-        </div>
-        <div class="progress ${progCls}"><div class="progress-bar ${barCls}" style="width:${t.status === "failed" ? 100 : pct}%"></div></div>
-        ${t.error ? `<div class="task-err">${esc(t.error)}</div>` : ""}
-      </div>`;
-    }).join("");
-    lastTaskIds = new Set(tasks.map((t) => t.id));
+    const active = tasks.filter((t) => !["done", "duplicate"].includes(t.status)).length;
+    const done = tasks.filter((t) => t.status === "done").length;
+    const failed = tasks.filter((t) => t.status === "failed").length;
+    $("#task-summary").innerHTML =
+      `<span class="num">${active} 进行中` +
+      (done ? ` · ${done} 完成` : "") +
+      (failed ? ` · <span style="color:var(--err)">${failed} 失败</span>` : "") +
+      `</span>`;
+    renderTasks(tasks);
   } catch (e) { console.error(e); }
 }
 

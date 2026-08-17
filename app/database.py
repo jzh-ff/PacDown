@@ -152,7 +152,10 @@ def find_by_video_id(platform: str, video_id: str) -> dict | None:
 
 def active_tasks() -> list[dict]:
     return query(
-        "SELECT * FROM videos WHERE status IN ('pending','parsing','downloading','processing') ORDER BY id DESC"
+        "SELECT * FROM videos WHERE status IN ('pending','parsing','downloading','processing')"
+        " OR (status='duplicate' AND created_at > datetime('now','localtime','-1 minute'))"
+        " OR (status='done' AND downloaded_at > datetime('now','localtime','-15 seconds'))"
+        " ORDER BY id DESC"
     )
 
 
