@@ -132,6 +132,19 @@ def history(platform: str = "", status: str = "", keyword: str = "",
             "page": page, "size": size}
 
 
+@app.get("/api/history/groups")
+def history_groups(platform: str = "", status: str = "", keyword: str = "",
+                   group_by: str = "date"):
+    if group_by not in ("date", "platform", "author"):
+        raise HTTPException(400, "group_by 仅支持 date/platform/author")
+    groups = database.history_groups(platform, status, keyword, group_by)
+    return {"groups": [
+        {"key": g["key"], "label": g["label"], "count": g["count"],
+         "size": g["size"], "items": [_row_public(r) for r in g["items"]]}
+        for g in groups
+    ]}
+
+
 @app.get("/api/history/stats")
 def history_stats():
     return database.stats()

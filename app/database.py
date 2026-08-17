@@ -192,6 +192,44 @@ def history(platform: str = "", status: str = "", keyword: str = "",
     return rows, total
 
 
+def history_groups(platform: str = "", status: str = "", keyword: str = "",
+                   group_by: str = "date", limit: int = 300) -> list[dict]:
+    """分组视图：按 下载日期 / 平台 / 作者 分组展示。"""
+    where, params = ["1=1"], []
+    if platform:
+        where.append("platform=?")
+        params.append(platform)
+    if status:
+        where.append("status=?")
+        params.append(status)
+    if keyword:
+        where.append("(title LIKE ? OR author LIKE ?)")
+        params.extend([f"%{keyword}%", f"%{keyword}%"])
+    cond = " AND ".join(where)
+    rows = query(
+        f"SELECT * FROM videos WHERE {cond} ORDER BY downloaded_at DESC, id DESC LIMIT ?",
+        (*params, limit))
+    groups: dict[str, dict] = {}
+    for r in rows:
+        if group_by == "date":
+            key = (r["downloaded_at"] or r["created_at"] or "")[:10] or "未知日期"
+            label = key
+        elif group_by == "platform":
+            key = r["platform"]
+            label = key
+        elif group_by == "author":
+            key = r["author"] or "未知作者"
+            label = key
+        else:
+            key, label = "", ""
+        g = groups.setdefault(key, {"key": key, "label": label, "count": 0,
+                                    "size": 0, "items": []})
+        g["count"] += 1
+        g["size"] += r["file_size"] or 0
+        g["items"].append(r)
+    return list(groups.values())
+
+
 def stats() -> dict:
     total = query_one("SELECT COUNT(*) AS n, COALESCE(SUM(file_size),0) AS size FROM videos WHERE status='done'")
     today = query_one("SELECT COUNT(*) AS n FROM videos WHERE status='done' AND date(downloaded_at)=date('now','localtime')")

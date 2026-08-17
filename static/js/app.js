@@ -366,8 +366,17 @@ window.retryTask = async (id) => {
 
 /* ---------- 历史页 ---------- */
 
-let historyState = { page: 1, platform: "", status: "", keyword: "" };
+let historyState = { page: 1, platform: "", status: "", keyword: "", group: "date" };
 let historyLoaded = false;   // 首次加载后才显示骨架屏，静默刷新不闪
+
+const GROUP_LABEL = { date: "按日期", platform: "按平台", author: "按作者" };
+
+function groupLabel(g) {
+  if (historyState.group === "date") return g.label;
+  if (historyState.group === "platform") return PLATFORM_NAME[g.key] || g.key;
+  if (historyState.group === "author") return g.label || "未知作者";
+  return g.label;
+}
 
 async function loadHistory(silent = false) {
   const grid = $("#history-grid");
@@ -376,18 +385,52 @@ async function loadHistory(silent = false) {
   }
   loadStats();
   const s = historyState;
-  const params = new URLSearchParams({
-    page: s.page, size: 24, platform: s.platform, status: s.status, keyword: s.keyword,
-  });
   try {
-    const { items, total, page, size } = await api(`/api/history?${params}`);
-    // 若显示的是骨架屏（重新进入页或数据变化），强制重绘
-    if (grid.querySelector(".skeleton")) delete grid.dataset.sig;
-    renderHistory(items, total, page, size);
+    if (s.group === "none") {
+      const params = new URLSearchParams({
+        page: s.page, size: 24, platform: s.platform, status: s.status, keyword: s.keyword,
+      });
+      const { items, total, page, size } = await api(`/api/history?${params}`);
+      if (grid.querySelector(".skeleton")) delete grid.dataset.sig;
+      renderHistory(items, total, page, size);
+    } else {
+      const params = new URLSearchParams({
+        platform: s.platform, status: s.status, keyword: s.keyword, group_by: s.group,
+      });
+      const { groups } = await api(`/api/history/groups?${params}`);
+      if (grid.querySelector(".skeleton")) delete grid.dataset.sig;
+      renderGroups(groups);
+    }
     historyLoaded = true;
   } catch (e) {
     if (!silent) grid.innerHTML = `<div class="empty" style="grid-column:1/-1"><p>${esc(e.message)}</p></div>`;
   }
+}
+
+function renderGroups(groups) {
+  const grid = $("#history-grid");
+  const sig = JSON.stringify([historyState, groups.map((g) => g.key + ":" + g.count + ":" + g.size)]);
+  if (grid.dataset.sig === sig) return;
+  const isRefresh = Boolean(grid.dataset.sig);
+  grid.dataset.sig = sig;
+  grid.classList.toggle("no-anim", isRefresh);
+  $("#pagination").innerHTML = "";
+  if (!groups.length) {
+    grid.innerHTML = `<div class="empty" style="grid-column:1/-1">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 15l5-5 4 4 3-3 6 6"/></svg>
+      <p>还没有下载记录<br>回到「下载」页，粘贴一个链接开始</p></div>`;
+    return;
+  }
+  grid.innerHTML = groups.map((g) => {
+    const cards = g.items.map((v) => hCardHTML(v, 0)).join("");
+    return `<div class="group-block" style="grid-column:1/-1">
+      <div class="group-head">
+        <span class="group-label">${esc(groupLabel(g))}</span>
+        <span class="group-meta num">${g.count} 个 · ${fmtSize(g.size) || "0 MB"}</span>
+      </div>
+      <div class="group-grid">${cards}</div>
+    </div>`;
+  }).join("");
 }
 
 async function loadStats() {
@@ -418,6 +461,32 @@ async function loadStats() {
   } catch (e) { console.error(e); }
 }
 
+function hCardHTML(v, i) {
+  const imageCount = JSON.parse(v.images || "[]").length;
+  // 封面：优先平台封面，图集无封面时回退到本地第一张图
+  const coverSrcVal = v.cover_url
+    ? coverSrc(v.cover_url, v.platform)
+    : (imageCount ? `/api/file?id=${v.id}&type=image&index=0` : "");
+  const cover = coverSrcVal
+    ? `<img src="${esc(coverSrcVal)}" loading="lazy" alt="" onerror="this.style.display='none'">` : "";
+  const durOrCount = imageCount
+    ? `<span class="h-dur" style="display:inline-flex;align-items:center;gap:3px">
+         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.8"/><path d="M21 15.5l-5-5L5 21"/></svg>${imageCount} 图</span>`
+    : (v.duration ? `<span class="h-dur">${fmtDuration(v.duration)}</span>` : "");
+  return `<div class="h-card" style="animation-delay:${Math.min(i * 30, 240)}ms" onclick="openDetail(${v.id})">
+    <div class="h-cover">
+      ${cover}
+      ${durOrCount}
+      <span class="h-status">${statusBadge(v.status)}</span>
+    </div>
+    <div class="h-body">
+      <div class="h-title">${esc(v.title || "(无标题)")}</div>
+      <div class="h-meta">${badge(v.platform)}<span class="author">${esc(v.author || "")}</span>
+        <span class="size">${fmtSize(v.file_size)}</span></div>
+    </div>
+  </div>`;
+}
+
 function renderHistory(items, total, page, size) {
   const grid = $("#history-grid");
   // 数据未变化时不重绘（避免轮询刷新时整页闪烁）
@@ -433,31 +502,7 @@ function renderHistory(items, total, page, size) {
     $("#pagination").innerHTML = "";
     return;
   }
-  grid.innerHTML = items.map((v, i) => {
-    const imageCount = JSON.parse(v.images || "[]").length;
-    // 封面：优先平台封面，图集无封面时回退到本地第一张图
-    const coverSrcVal = v.cover_url
-      ? coverSrc(v.cover_url, v.platform)
-      : (imageCount ? `/api/file?id=${v.id}&type=image&index=0` : "");
-    const cover = coverSrcVal
-      ? `<img src="${esc(coverSrcVal)}" loading="lazy" alt="" onerror="this.style.display='none'">` : "";
-    const durOrCount = imageCount
-      ? `<span class="h-dur" style="display:inline-flex;align-items:center;gap:3px">
-           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.8"/><path d="M21 15.5l-5-5L5 21"/></svg>${imageCount} 图</span>`
-      : (v.duration ? `<span class="h-dur">${fmtDuration(v.duration)}</span>` : "");
-    return `<div class="h-card" style="animation-delay:${Math.min(i * 30, 240)}ms" onclick="openDetail(${v.id})">
-      <div class="h-cover">
-        ${cover}
-        ${durOrCount}
-        <span class="h-status">${statusBadge(v.status)}</span>
-      </div>
-      <div class="h-body">
-        <div class="h-title">${esc(v.title || "(无标题)")}</div>
-        <div class="h-meta">${badge(v.platform)}<span class="author">${esc(v.author || "")}</span>
-          <span class="size">${fmtSize(v.file_size)}</span></div>
-      </div>
-    </div>`;
-  }).join("");
+  grid.innerHTML = items.map((v, i) => hCardHTML(v, i)).join("");
   // 分页
   const pages = Math.ceil(total / size);
   if (pages <= 1) { $("#pagination").innerHTML = ""; return; }
@@ -489,6 +534,9 @@ $("#history-platform").addEventListener("change", (e) => {
 });
 $("#history-status").addEventListener("change", (e) => {
   historyState.status = e.target.value; historyState.page = 1; loadHistory();
+});
+$("#history-group").addEventListener("change", (e) => {
+  historyState.group = e.target.value; historyState.page = 1; loadHistory();
 });
 $("#btn-export").addEventListener("click", () => {
   window.location.href = "/api/history/export";
