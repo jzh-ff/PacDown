@@ -257,32 +257,28 @@ function updateTaskEl(el, t, fresh = false) {
     const v = val || "";
     if (node.textContent !== v) node.textContent = v;
   };
+  const setClass = (node, cls) => { if (node.className !== cls) node.className = cls; };
   setText("title", t.title || t.file_path || "正在解析…");
   setText("author", t.author);
   setText("speed", t.status === "downloading" ? (t.speed || "") : "");
   const badgeEl = q("badge");
-  const badgeHtml = badge(t.platform);
-  if (badgeEl.dataset.p !== t.platform) { badgeEl.innerHTML = badgeHtml; badgeEl.dataset.p = t.platform; }
+  if (badgeEl.dataset.p !== t.platform) { badgeEl.innerHTML = badge(t.platform); badgeEl.dataset.p = t.platform; }
   const stEl = q("status");
-  const stHtml = statusBadge(t.status);
-  if (stEl.dataset.s !== t.status) { stEl.innerHTML = stHtml; stEl.dataset.s = t.status; }
+  if (stEl.dataset.s !== t.status) { stEl.innerHTML = statusBadge(t.status); stEl.dataset.s = t.status; }
 
   const wrap = q("progressWrap");
   const bar = q("bar");
-  wrap.className = "progress" + (t.status === "done" ? " ok" : t.status === "failed" ? " err" : "");
+  setClass(wrap, "progress" + (t.status === "done" ? " ok" : t.status === "failed" ? " err" : ""));
   if (t.status === "parsing") {
-    bar.className = "progress-bar indeterminate";
+    setClass(bar, "progress-bar indeterminate");
   } else if (t.status === "pending") {
-    bar.className = "progress-bar";
+    setClass(bar, "progress-bar");
     bar.style.width = "0%";
   } else if (t.status === "downloading" || t.status === "processing") {
-    bar.className = "progress-bar striped";
+    setClass(bar, "progress-bar striped");
     bar.style.width = `${t.status === "processing" ? 99 : (t.progress || 0)}%`;
-  } else if (t.status === "done") {
-    bar.className = "progress-bar";
-    bar.style.width = "100%";
-  } else if (t.status === "duplicate") {
-    bar.className = "progress-bar";
+  } else {
+    setClass(bar, "progress-bar");
     bar.style.width = "100%";
   }
 
@@ -295,7 +291,7 @@ function updateTaskEl(el, t, fresh = false) {
   if (t.status === "done" && !doneNotified.has(t.id)) {
     doneNotified.add(t.id);
     toast(`《${(t.title || "视频").slice(0, 30)}》下载完成`, "ok");
-    if ($("#page-history").classList.contains("active")) loadHistory();
+    if ($("#page-history").classList.contains("active")) loadHistory(true);
   }
   // duplicate 提示：8 秒后自动清理
   if (t.status === "duplicate" && !dupTimers.has(t.id)) {
@@ -331,19 +327,24 @@ async function pollTasks(force = false) {
   try {
     const { tasks } = await api("/api/tasks");
     const hasVisible = tasks.length > 0;
-    $("#tasks-head").hidden = !hasVisible;
     if (!hasVisible) {
-      $("#task-list").innerHTML = "";
+      // 完全无任务：仅一次性清理，之后不再碰 DOM
+      if (!$("#tasks-head").hidden || $("#task-list").children.length) {
+        $("#tasks-head").hidden = true;
+        $("#task-list").innerHTML = "";
+      }
       return;
     }
     const active = tasks.filter((t) => !["done", "duplicate"].includes(t.status)).length;
     const done = tasks.filter((t) => t.status === "done").length;
     const failed = tasks.filter((t) => t.status === "failed").length;
-    $("#task-summary").innerHTML =
+    const summaryHtml =
       `<span class="num">${active} 进行中` +
       (done ? ` · ${done} 完成` : "") +
       (failed ? ` · <span style="color:var(--err)">${failed} 失败</span>` : "") +
       `</span>`;
+    if ($("#tasks-head").hidden) $("#tasks-head").hidden = false;
+    if ($("#task-summary").innerHTML !== summaryHtml) $("#task-summary").innerHTML = summaryHtml;
     renderTasks(tasks);
   } catch (e) { console.error(e); }
 }
@@ -359,10 +360,13 @@ window.retryTask = async (id) => {
 /* ---------- 历史页 ---------- */
 
 let historyState = { page: 1, platform: "", status: "", keyword: "" };
+let historyLoaded = false;   // 首次加载后才显示骨架屏，静默刷新不闪
 
-async function loadHistory() {
+async function loadHistory(silent = false) {
   const grid = $("#history-grid");
-  grid.innerHTML = Array(6).fill(`<div class="skeleton"><div class="sk-cover"></div><div class="sk-line" style="width:80%"></div><div class="sk-line" style="width:55%"></div></div>`).join("");
+  if (!silent || !historyLoaded) {
+    grid.innerHTML = Array(6).fill(`<div class="skeleton"><div class="sk-cover"></div><div class="sk-line" style="width:80%"></div><div class="sk-line" style="width:55%"></div></div>`).join("");
+  }
   loadStats();
   const s = historyState;
   const params = new URLSearchParams({
@@ -371,8 +375,9 @@ async function loadHistory() {
   try {
     const { items, total, page, size } = await api(`/api/history?${params}`);
     renderHistory(items, total, page, size);
+    historyLoaded = true;
   } catch (e) {
-    grid.innerHTML = `<div class="empty" style="grid-column:1/-1"><p>${esc(e.message)}</p></div>`;
+    if (!silent) grid.innerHTML = `<div class="empty" style="grid-column:1/-1"><p>${esc(e.message)}</p></div>`;
   }
 }
 
@@ -387,7 +392,7 @@ async function loadStats() {
       today: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
       failed: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 8v5m0 3h.01M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z"/></svg>',
     };
-    $("#stat-row").innerHTML = `
+    const html = `
       <div class="stat-card glass"><div class="stat-label">${icons.total}已保存视频</div>
         <div class="stat-value num">${st.total}</div><div class="stat-sub">${platChips}</div></div>
       <div class="stat-card glass"><div class="stat-label">${icons.size}占用空间</div>
@@ -396,11 +401,22 @@ async function loadStats() {
         <div class="stat-value num">${st.today}</div><div class="stat-sub">最近 24 小时内完成</div></div>
       <div class="stat-card glass"><div class="stat-label">${icons.failed}失败任务</div>
         <div class="stat-value num" style="${st.failed ? "color:var(--err)" : ""}">${st.failed}</div><div class="stat-sub">可在任务列表重试</div></div>`;
+    // 内容无变化时不重绘，避免数字块闪烁
+    if ($("#stat-row").dataset.sig !== st.total + "_" + st.total_size + "_" + st.today + "_" + st.failed) {
+      $("#stat-row").innerHTML = html;
+      $("#stat-row").dataset.sig = st.total + "_" + st.total_size + "_" + st.today + "_" + st.failed;
+    }
   } catch (e) { console.error(e); }
 }
 
 function renderHistory(items, total, page, size) {
   const grid = $("#history-grid");
+  // 数据未变化时不重绘（避免轮询刷新时整页闪烁）
+  const sig = JSON.stringify([historyState, total, items.map((v) => v.id + ":" + v.status + ":" + v.file_size)]);
+  if (grid.dataset.sig === sig) return;
+  const isRefresh = Boolean(grid.dataset.sig);   // 静默刷新时卡片不再重播入场动画
+  grid.dataset.sig = sig;
+  grid.classList.toggle("no-anim", isRefresh);
   if (!items.length) {
     grid.innerHTML = `<div class="empty" style="grid-column:1/-1">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 15l5-5 4 4 3-3 6 6"/></svg>

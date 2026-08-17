@@ -355,8 +355,10 @@ body {
 }
 .progress-bar.indeterminate::after {
   content: ""; position: absolute; inset: 0; border-radius: 999px;
-  background: var(--brand-grad);
-  animation: slide 1.4s ease-in-out infinite;
+  background: linear-gradient(90deg, transparent 0%,
+              var(--brand-1) 30%, var(--brand-2) 55%, transparent 85%);
+  opacity: .55;
+  animation: slide 1.8s cubic-bezier(.45, .05, .55, .95) infinite;
 }
 @keyframes slide {
   0% { transform: translateX(-100%); }
@@ -364,9 +366,9 @@ body {
 }
 .progress-bar.striped::after {
   content: ""; position: absolute; inset: 0;
-  background: linear-gradient(100deg, transparent 30%, rgba(255, 255, 255, .35) 50%, transparent 70%);
+  background: linear-gradient(100deg, transparent 30%, rgba(255, 255, 255, .18) 50%, transparent 70%);
   background-size: 60px 100%;
-  animation: shimmer 1.1s linear infinite;
+  animation: shimmer 1.6s linear infinite;
 }
 @keyframes shimmer {
   0% { background-position: -60px 0; }
@@ -426,6 +428,7 @@ body {
   animation: pagein .3s backwards;
 }
 .h-card:hover { transform: translateY(-3px); border-color: var(--border-hi); box-shadow: var(--shadow-2); }
+.history-grid.no-anim .h-card { animation: none; }
 .h-cover { position: relative; aspect-ratio: 16/9.5; background: var(--surface-2); overflow: hidden; }
 .h-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .h-dur {
