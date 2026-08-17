@@ -43,25 +43,57 @@ def safe_filename(name: str, max_len: int = 80) -> str:
 
 
 def stream_download(url: str, dest: Path, platform: str, progress=None,
-                    referer: str = "", mobile: bool = False) -> dict:
-    """流式下载 url 到 dest，返回 {file_path, file_size}。"""
+                    referer: str = "", mobile: bool = False,
+                    resume: bool = False, extra_headers: dict | None = None) -> dict:
+    """流式下载 url 到 dest，返回 {file_path, file_size}。
+
+    resume=True 时启用断点续传：先写 dest.part（已存在则 Range 追加），
+    完成后改名为 dest。
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    headers = {"Referer": referer} if referer else {}
+    headers = dict(extra_headers or {})
+    if referer:
+        headers.setdefault("Referer", referer)
+
+    target = dest
+    done = 0
+    if resume:
+        target = dest.with_name(dest.name + ".part")
+        if target.exists():
+            done = target.stat().st_size
+            if done:
+                headers["Range"] = f"bytes={done}-"
+
     with client(platform, mobile=mobile) as c:
         with c.stream("GET", url, headers=headers) as resp:
+            if done and resp.status_code == 200:
+                # 服务端不支持 Range：重新下载
+                done = 0
             resp.raise_for_status()
             total = int(resp.headers.get("content-length") or 0)
-            done = 0
-            with open(dest, "wb") as f:
+            if total and done:
+                total += done
+            with open(target, "ab" if done else "wb") as f:
                 for chunk in resp.iter_bytes(chunk_size=1 << 18):
                     f.write(chunk)
                     done += len(chunk)
                     if progress and total:
                         try:
-                            progress(done / total * 100,
+                            progress(min(done / total * 100, 100),
                                      f"{done / 1024 / 1024:.1f}MB")
                         except Exception:
                             pass
+    if resume and target != dest:
+        # Windows 上杀毒/索引可能短暂占用新文件，重试几次
+        import time as _time
+        for attempt in range(6):
+            try:
+                target.replace(dest)
+                break
+            except OSError:
+                if attempt == 5:
+                    raise
+                _time.sleep(0.5)
     size = dest.stat().st_size
     if progress:
         progress(100, "完成")

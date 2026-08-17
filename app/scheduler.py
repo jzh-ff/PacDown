@@ -12,7 +12,7 @@ from . import config, database
 from .downloader import manager
 from .parsers.http_download import client as http_client
 
-SUPPORTED = {"bilibili", "douyin"}
+SUPPORTED = {"bilibili", "douyin", "xiaohongshu", "kuaishou"}
 
 
 def parse_uploader_url(url: str) -> tuple[str, str]:
@@ -28,7 +28,17 @@ def parse_uploader_url(url: str) -> tuple[str, str]:
         if not m:
             raise ValueError("抖音订阅链接格式：https://www.douyin.com/user/{sec_uid}")
         return "douyin", m.group(1)
-    raise ValueError("暂不支持该平台的订阅（当前支持：B站、抖音）")
+    if "xiaohongshu.com/user/profile/" in low:
+        m = re.search(r"/user/profile/([0-9a-f]{24})", url)
+        if not m:
+            raise ValueError("小红书订阅链接格式：https://www.xiaohongshu.com/user/profile/{用户ID}")
+        return "xiaohongshu", m.group(1)
+    if "kuaishou.com/profile/" in low:
+        m = re.search(r"kuaishou\.com/profile/([A-Za-z0-9_\-]+)", url)
+        if not m:
+            raise ValueError("快手订阅链接格式：https://www.kuaishou.com/profile/{用户ID}")
+        return "kuaishou", m.group(1)
+    raise ValueError("暂不支持该平台的订阅（当前支持：B站、抖音、小红书、快手）")
 
 
 def fetch_uploader_info(platform: str, uploader_id: str) -> dict:
@@ -50,6 +60,28 @@ def fetch_uploader_info(platform: str, uploader_id: str) -> dict:
                 r = c.get(f"https://www.douyin.com/user/{uploader_id}")
             m = re.search(r'"nickname":"(.*?)"', r.text)
             a = re.search(r'"avatar_thumb":\{[^}]*?"url_list":\["(.*?)"', r.text)
+            return {"name": (m.group(1) if m else f"博主{uploader_id[:8]}"),
+                    "avatar": (a.group(1) if a else "")}
+        except Exception:
+            return {"name": f"博主{uploader_id[:8]}", "avatar": ""}
+    if platform == "xiaohongshu":
+        try:
+            with http_client("xiaohongshu") as c:
+                r = c.get(f"https://www.xiaohongshu.com/user/profile/{uploader_id}")
+            m = re.search(r'"nickname":"(.*?)"', r.text)
+            a = re.search(r'"avatar":"(.*?)"', r.text)
+            return {"name": (m.group(1) if m else f"博主{uploader_id[:8]}"),
+                    "avatar": (a.group(1) if a else "")}
+        except Exception:
+            return {"name": f"博主{uploader_id[:8]}", "avatar": ""}
+    if platform == "kuaishou":
+        try:
+            with http_client("kuaishou", mobile=True) as c:
+                r = c.get(f"https://www.kuaishou.com/profile/{uploader_id}")
+            m = re.search(r'"user_name":"(.*?)"', r.text) or \
+                re.search(r'"userName":"(.*?)"', r.text)
+            a = re.search(r'"headurl":"(.*?)"', r.text) or \
+                re.search(r'"headUrl":"(.*?)"', r.text)
             return {"name": (m.group(1) if m else f"博主{uploader_id[:8]}"),
                     "avatar": (a.group(1) if a else "")}
         except Exception:
@@ -96,6 +128,110 @@ def _wbi_sign(params: dict) -> dict:
     return params
 
 
+def fetch_uploader_videos(platform: str, uploader_id: str,
+                          limit: int = 20) -> list[dict]:
+    """博主最新视频列表（订阅与主页批量下载共用）。"""
+    if platform == "bilibili":
+        return _fetch_bilibili_videos(uploader_id, limit)
+    if platform == "douyin":
+        return _fetch_douyin_videos(uploader_id, limit)
+    if platform == "xiaohongshu":
+        return _fetch_xiaohongshu_videos(uploader_id, limit)
+    if platform == "kuaishou":
+        return _fetch_kuaishou_videos(uploader_id, limit)
+    raise ValueError("该平台暂不支持视频列表")
+
+
+def _fetch_xiaohongshu_videos(user_id: str, limit: int = 20) -> list[dict]:
+    """小红书博主笔记列表：主页 __INITIAL_STATE__（需 Cookie，实验性）。"""
+    with http_client("xiaohongshu") as c:
+        r = c.get(f"https://www.xiaohongshu.com/user/profile/{user_id}")
+    m = re.search(r"window\.__INITIAL_STATE__\s*=\s*(\{.*?\})\s*</script>", r.text, re.S)
+    if not m:
+        raise RuntimeError("小红书主页数据未获取到（请先在设置中配置小红书 Cookie）")
+    state = json.loads(m.group(1).replace("undefined", "null"))
+    notes: list[dict] = []
+
+    def dig(obj):
+        if len(notes) >= limit:
+            return
+        if isinstance(obj, dict):
+            if "noteId" in obj and ("title" in obj or "displayTitle" in obj):
+                notes.append(obj)
+                return
+            for v in obj.values():
+                dig(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                dig(v)
+
+    dig(state)
+    entries = []
+    seen = set()
+    for n in notes:
+        nid = n.get("noteId") or ""
+        if not nid or nid in seen:
+            continue
+        seen.add(nid)
+        cover = n.get("cover") or {}
+        entries.append({
+            "video_id": nid,
+            "title": (n.get("title") or n.get("displayTitle") or "无标题")[:80],
+            "url": f"https://www.xiaohongshu.com/explore/{nid}",
+            "cover": (cover.get("urlDefault") or cover.get("url") or "")
+            if isinstance(cover, dict) else "",
+            "publish_time": "",
+        })
+    return entries[:limit]
+
+
+def _fetch_kuaishou_videos(user_id: str, limit: int = 20) -> list[dict]:
+    """快手博主作品列表：主页 __NEXT_DATA__ 挖掘（实验性）。"""
+    with http_client("kuaishou", mobile=True) as c:
+        r = c.get(f"https://www.kuaishou.com/profile/{user_id}")
+    if r.status_code != 200:
+        raise RuntimeError(f"快手主页返回 {r.status_code}（可尝试配置快手 Cookie）")
+    photos: list[dict] = []
+
+    def dig(obj):
+        if len(photos) >= limit:
+            return
+        if isinstance(obj, dict):
+            if ("photoId" in obj or "photo_id" in obj) and "caption" in obj:
+                photos.append(obj)
+                return
+            for v in obj.values():
+                dig(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                dig(v)
+
+    data = None
+    for marker in ("__NEXT_DATA__", "videoData"):
+        from .parsers.http_download import fetch_json_in_html
+        data = fetch_json_in_html(r.text, f"{marker} =") or \
+            fetch_json_in_html(r.text, f'"{marker}":')
+        if isinstance(data, dict):
+            break
+    if not data:
+        raise RuntimeError("快手主页数据未获取到（可尝试配置快手 Cookie）")
+    dig(data)
+    entries = []
+    for p in photos[:limit]:
+        pid = str(p.get("photoId") or p.get("photo_id") or "")
+        if not pid:
+            continue
+        entries.append({
+            "video_id": pid,
+            "title": (p.get("caption") or "无标题").splitlines()[0][:80],
+            "url": f"https://www.kuaishou.com/short-video/{pid}",
+            "cover": (p.get("coverUrl") or "").split("!")[0],
+            "publish_time": _ts((p.get("timestamp") or 0) / 1000
+                                if p.get("timestamp", 0) > 10 ** 12 else p.get("timestamp")),
+        })
+    return entries
+
+
 def _fetch_bilibili_videos(mid: str, limit: int = 20) -> list[dict]:
     """B站空间最新视频：wbi 签名直调 arc/search；412/失败时回退 yt-dlp。"""
     try:
@@ -112,6 +248,9 @@ def _bili_videos_api(mid: str, limit: int) -> list[dict]:
             r = c.get("https://api.bilibili.com/x/space/wbi/arc/search",
                       params=params, headers=_wbi_headers())
             data = r.json()
+            if data.get("code") not in (0, None):
+                # -412 风控等：抛出让上层回退 yt-dlp
+                raise RuntimeError(f"空间接口返回 code={data.get('code')}（{data.get('message') or '可能被风控'}）")
             vlist = ((data.get("data") or {}).get("list") or {}).get("vlist") or []
             if not vlist:
                 break
@@ -121,6 +260,7 @@ def _bili_videos_api(mid: str, limit: int) -> list[dict]:
         "video_id": v["bvid"],
         "title": v.get("title") or "",
         "url": f"https://www.bilibili.com/video/{v['bvid']}",
+        "cover": (v.get("pic") or "").replace("http://", "https://"),
         "publish_time": _ts(v.get("created")),
     } for v in out[:limit] if v.get("bvid")]
 
@@ -144,6 +284,7 @@ def _bili_videos_ytdlp(mid: str, limit: int) -> list[dict]:
         if bvid:
             out.append({"video_id": bvid, "title": e.get("title") or bvid,
                         "url": f"https://www.bilibili.com/video/{bvid}",
+                        "cover": e.get("thumbnail") or "",
                         "publish_time": ""})
     return out
 
@@ -170,12 +311,19 @@ def _fetch_douyin_videos(sec_uid: str, limit: int = 20) -> list[dict]:
     if not data:
         raise RuntimeError("抖音主页数据未获取到（可能需要配置 Cookie 或触发风控）")
     dig(data)
-    return [{
-        "video_id": str(it.get("aweme_id") or ""),
-        "title": (it.get("desc") or "无标题").splitlines()[0][:80],
-        "url": f"https://www.douyin.com/video/{it.get('aweme_id')}",
-        "publish_time": _ts(it.get("create_time")),
-    } for it in items[:limit] if it.get("aweme_id")]
+    entries = []
+    for it in items[:limit]:
+        if not it.get("aweme_id"):
+            continue
+        cover = ((it.get("video") or {}).get("cover") or {}).get("url_list") or [""]
+        entries.append({
+            "video_id": str(it.get("aweme_id") or ""),
+            "title": (it.get("desc") or "无标题").splitlines()[0][:80],
+            "url": f"https://www.douyin.com/video/{it.get('aweme_id')}",
+            "cover": cover[0] if cover else "",
+            "publish_time": _ts(it.get("create_time")),
+        })
+    return entries
 
 
 def _ts(t) -> str:
@@ -191,16 +339,17 @@ def _ts(t) -> str:
 def check_subscription(sub: dict) -> int:
     """检查一个订阅，新视频入队。返回新增数。"""
     try:
-        if sub["platform"] == "bilibili":
-            videos = _fetch_bilibili_videos(sub["uploader_id"])
-        elif sub["platform"] == "douyin":
-            videos = _fetch_douyin_videos(sub["uploader_id"])
-        else:
-            raise RuntimeError("该平台订阅暂不支持")
+        videos = fetch_uploader_videos(sub["platform"], sub["uploader_id"])
     except Exception as e:
         database.update_sub(sub["id"], last_error=str(e)[:300],
                             last_checked=database.now())
         raise
+
+    # 每订阅的覆盖选项（未设置时用全局默认）
+    try:
+        sub_opts = json.loads(sub.get("options") or "{}")
+    except json.JSONDecodeError:
+        sub_opts = {}
 
     new_count = 0
     for v in videos:
@@ -211,8 +360,10 @@ def check_subscription(sub: dict) -> int:
         try:
             options = {
                 "quality": config.get("default_quality", "best"),
-                "extract_audio": config.get("extract_audio", False),
-                "download_danmaku": config.get("download_danmaku", False),
+                "extract_audio": sub_opts.get("extract_audio",
+                                             bool(config.get("extract_audio", False))),
+                "download_danmaku": sub_opts.get("download_danmaku",
+                                                 bool(config.get("download_danmaku", False))),
                 "from_subscription": sub["id"],
             }
             manager.create_task(v["url"], options, force=False)
@@ -223,6 +374,11 @@ def check_subscription(sub: dict) -> int:
     database.update_sub(
         sub["id"], last_checked=database.now(), last_error="",
         new_count=sub["new_count"] + new_count)
+    if new_count:
+        database.insert_notification(
+            "subscription",
+            f"「{sub['uploader_name']}」更新 {new_count} 个视频",
+            "已自动加入下载队列")
     return new_count
 
 

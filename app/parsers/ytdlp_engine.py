@@ -125,6 +125,8 @@ def download(url: str, dest_dir: str, platform: str, options: dict,
         "restrictfilenames": False,
         "windowsfilenames": True,
     }
+    if options.get("_referer"):  # 直链/m3u8 自定义 Referer
+        opts["http_headers"] = {"Referer": options["_referer"]}
     cf = _cookie_file(platform)
     if cf:
         opts["cookiefile"] = cf

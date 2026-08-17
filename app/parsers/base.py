@@ -35,7 +35,9 @@ class VideoInfo:
 
 
 # URL 提取：从任意分享文本中抓出全部 http(s) 链接
-URL_RE = re.compile(r"https?://[^\s，,。、！!？?\)）\"'<>]+")
+# 注意：半角 ? 与 & 是合法 URL 字符（?p=2 分P、xsec_token 等），不能排除；
+# 只排除空白、中文标点与成对出现的括号/引号
+URL_RE = re.compile(r"https?://[^\s，,。、！!？\)）\"'<>【】]+")
 
 KNOWN_HOSTS = [
     ("bilibili", ["bilibili.com", "b23.tv"]),
@@ -47,7 +49,13 @@ KNOWN_HOSTS = [
 
 def extract_urls(text: str) -> list[str]:
     """从粘贴文本中提取所有链接（每行一个链接、或整段分享文案均可）。"""
-    return [u.rstrip("\\").rstrip("】，。") for u in URL_RE.findall(text or "")]
+    out = []
+    for u in URL_RE.findall(text or ""):
+        # 句尾残留的标点与悬空查询符
+        u = u.rstrip("\\").rstrip("】，。").rstrip("?&")
+        if u:
+            out.append(u)
+    return out
 
 
 def guess_platform(url: str) -> str | None:

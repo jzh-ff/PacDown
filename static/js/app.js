@@ -8,10 +8,10 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
 
 const PLATFORM_NAME = {
   bilibili: "哔哩哔哩", douyin: "抖音", kuaishou: "快手",
-  xiaohongshu: "小红书", generic: "通用",
+  xiaohongshu: "小红书", direct: "直链", generic: "通用",
 };
 const STATUS_TEXT = {
-  pending: "排队中", parsing: "解析中", downloading: "下载中",
+  pending: "排队中", parsing: "解析中", working: "解析中", downloading: "下载中",
   processing: "后处理", done: "已完成", failed: "失败", duplicate: "已存在",
 };
 
@@ -92,6 +92,7 @@ $("#nav").addEventListener("click", (e) => {
   if (btn.dataset.page === "subs") loadSubs();
   if (btn.dataset.page === "settings") loadSettings();
   if (btn.dataset.page === "repost") loadRepost();
+  if (btn.dataset.page === "tools") loadToolbox();
 });
 
 /* ---------- 下载页 ---------- */
@@ -133,7 +134,7 @@ $("#btn-parse").addEventListener("click", async () => {
   try {
     const { results } = await api("/api/parse", { method: "POST", body: { text } });
     if (!results.length) { toast("未识别到链接", "warn"); return; }
-    parseItems = results.map((r) => ({ ...r, checked: r.ok }));
+    parseItems = results.map((r) => normalizeParseItem(r));
     renderParseResults();
     const fails = results.filter((r) => !r.ok).length;
     toast(`解析完成：${results.length - fails} 个成功${fails ? `，${fails} 个失败` : ""}`, fails ? "warn" : "ok");
@@ -144,42 +145,109 @@ $("#btn-parse").addEventListener("click", async () => {
   }
 });
 
+/* 解析结果项归一化：主页/合集/分P 统一转成 sections 结构（可勾选子项） */
+function normalizeParseItem(r) {
+  const item = { ...r, checked: r.ok, expanded: false };
+  const wrap = (entries) => entries.map((e) => ({ ...e, checked: true }));
+  if (r.kind === "uploader" && r.entries) {
+    item.sections = [{
+      label: `${r.uploader?.name || "博主"} 的最新 ${r.entries.length} 个视频`,
+      entries: wrap(r.entries),
+    }];
+  } else if (r.kind === "playlist" && r.entries) {
+    item.sections = [{ label: r.title || "合集", entries: wrap(r.entries) }];
+  } else if (r.kind === "playlist" && r.sections) {
+    item.sections = r.sections.map((s) => ({
+      label: s.label, entries: wrap(s.entries || []),
+    }));
+  }
+  return item;
+}
+
 function renderParseResults() {
   const box = $("#parse-results");
   box.hidden = false;
-  $("#check-all").checked = parseItems.every((p) => p.checked);
-  $("#parse-list").innerHTML = parseItems.map((p, i) => {
-    if (!p.ok) {
-      return `<div class="parse-item error">
-        <input type="checkbox" class="pcheck" data-i="${i}" ${p.checked ? "" : "disabled"}>
-        <div class="parse-info">
-          <div class="parse-title" style="color:var(--text-3)">${esc(p.url.slice(0, 70))}</div>
-          <div class="parse-err">解析失败：${esc(p.error)}</div>
-        </div>
-        ${statusBadge("failed")}
-      </div>`;
-    }
-    const info = p.info;
-    const stats = [];
-    if (info.stats?.play != null) stats.push(`播放 ${fmtCount(info.stats.play)}`);
-    if (info.stats?.like != null) stats.push(`赞 ${fmtCount(info.stats.like)}`);
-    return `<div class="parse-item" style="animation-delay:${Math.min(i * 45, 300)}ms">
-      <input type="checkbox" class="pcheck" data-i="${i}" ${p.checked ? "checked" : ""}>
-      <img class="parse-cover" src="${esc(coverSrc(info.cover_url, info.platform))}" alt=""
-           onerror="this.style.visibility='hidden'">
+  updateCheckAll();
+  $("#parse-list").innerHTML = parseItems.map((p, i) => renderParseItem(p, i)).join("");
+}
+
+function renderParseItem(p, i) {
+  if (!p.ok) {
+    return `<div class="parse-item error">
+      <input type="checkbox" class="pcheck" data-i="${i}" disabled>
       <div class="parse-info">
-        <div class="parse-title">${esc(info.title || "(无标题)")}</div>
-        <div class="parse-meta">
-          ${badge(info.platform)}
-          <span>${esc(info.author || "未知作者")}</span>
-          ${info.duration ? `<span class="num">${fmtDuration(info.duration)}</span>` : ""}
-          ${info.publish_time ? `<span class="num">${fmtTime(info.publish_time)}</span>` : ""}
-          ${info.is_images ? `<span style="color:var(--cyan)">图集 · ${info.image_count} 张</span>` : ""}
-          ${stats.map((s) => `<span>${s}</span>`).join("")}
-        </div>
+        <div class="parse-title" style="color:var(--text-3)">${esc(p.url.slice(0, 70))}</div>
+        <div class="parse-err">解析失败：${esc(p.error)}</div>
       </div>
+      ${statusBadge("failed")}
     </div>`;
-  }).join("");
+  }
+
+  // 批量型：博主主页 / 合集 / 分P
+  if (p.sections) {
+    const total = p.sections.reduce((n, s) => n + s.entries.length, 0);
+    let head;
+    if (p.uploader) {
+      head = `<img class="parse-cover" src="${esc(coverSrc(p.uploader.avatar, p.uploader.platform))}" alt=""
+                 onerror="this.style.visibility='hidden'">
+        <div class="parse-info">
+          <div class="parse-title">${esc(p.uploader.name || "博主")} 的主页</div>
+          <div class="parse-meta">${badge(p.uploader.platform)}<span>批量下载最新视频</span></div>
+        </div>`;
+    } else {
+      const info = p.info || {};
+      head = `<img class="parse-cover" src="${esc(coverSrc(info.cover_url, info.platform))}" alt=""
+                 onerror="this.style.visibility='hidden'">
+        <div class="parse-info">
+          <div class="parse-title">${esc(info.title || "(无标题)")}</div>
+          <div class="parse-meta">${badge(info.platform)}<span>${esc(info.author || "")}</span></div>
+        </div>`;
+    }
+    const sectionsBody = p.sections.map((s, si) => `
+      <div class="child-section">
+        <div class="child-label">${esc(s.label)}</div>
+        ${s.entries.map((e, ci) => `
+          <label class="child-item">
+            <input type="checkbox" class="ccheck" data-i="${i}" data-s="${si}" data-c="${ci}" ${e.checked ? "checked" : ""}>
+            ${e.cover ? `<img class="child-cover" loading="lazy" src="${esc(coverSrc(e.cover, p.uploader?.platform || p.info?.platform || ""))}" alt="" onerror="this.style.visibility='hidden'">` : ""}
+            <span class="child-title">${e.index != null ? `<b class="num child-idx">${e.index}</b>` : ""}${esc(e.title || "(无标题)")}</span>
+            ${e.duration ? `<span class="num">${fmtDuration(e.duration)}</span>` : ""}
+            ${e.publish_time ? `<span class="num">${fmtTime(e.publish_time)}</span>` : ""}
+          </label>`).join("")}
+      </div>`).join("");
+    return `<div class="parse-item batch">
+      <div class="parse-row">
+        ${head}
+        <button class="btn btn-ghost btn-sm expand-btn" data-i="${i}">
+          ${p.expanded ? "收起" : `展开批量下载（${total} 个）`}
+        </button>
+      </div>
+      <div class="children" ${p.expanded ? "" : "hidden"}>${sectionsBody}</div>
+    </div>`;
+  }
+
+  // 普通视频
+  const info = p.info;
+  const stats = [];
+  if (info.stats?.play != null) stats.push(`播放 ${fmtCount(info.stats.play)}`);
+  if (info.stats?.like != null) stats.push(`赞 ${fmtCount(info.stats.like)}`);
+  return `<div class="parse-item" style="animation-delay:${Math.min(i * 45, 300)}ms">
+    <input type="checkbox" class="pcheck" data-i="${i}" ${p.checked ? "checked" : ""}>
+    <img class="parse-cover" src="${esc(coverSrc(info.cover_url, info.platform))}" alt=""
+         onerror="this.style.visibility='hidden'">
+    <div class="parse-info">
+      <div class="parse-title">${esc(info.title || "(无标题)")}</div>
+      <div class="parse-meta">
+        ${badge(info.platform)}
+        <span>${esc(info.author || "未知作者")}</span>
+        ${info.duration ? `<span class="num">${fmtDuration(info.duration)}</span>` : ""}
+        ${info.publish_time ? `<span class="num">${fmtTime(info.publish_time)}</span>` : ""}
+        ${info.is_images ? `<span style="color:var(--cyan)">图集 · ${info.image_count} 张</span>` : ""}
+        ${stats.map((s) => `<span>${s}</span>`).join("")}
+      </div>
+      ${p.collection ? `<button class="btn btn-ghost btn-sm coll-btn" data-i="${i}">所属合集《${esc(p.collection.name || "合集")}》· 点击展开下载全集</button>` : ""}
+    </div>
+  </div>`;
 }
 
 function fmtCount(n) {
@@ -189,21 +257,84 @@ function fmtCount(n) {
   return String(n);
 }
 
+function updateCheckAll() {
+  const states = [];
+  parseItems.forEach((p) => {
+    if (!p.ok) return;
+    if (p.sections) p.sections.forEach((s) => s.entries.forEach((e) => states.push(e.checked)));
+    else states.push(p.checked);
+  });
+  $("#check-all").checked = states.length > 0 && states.every(Boolean);
+}
+
 $("#parse-list").addEventListener("change", (e) => {
   const cb = e.target.closest(".pcheck");
   if (cb) {
     parseItems[+cb.dataset.i].checked = cb.checked;
-    $("#check-all").checked = parseItems.filter((p) => p.ok).every((p) => p.checked);
+    updateCheckAll();
+    return;
+  }
+  const cc = e.target.closest(".ccheck");
+  if (cc) {
+    parseItems[+cc.dataset.i].sections[+cc.dataset.s].entries[+cc.dataset.c].checked = cc.checked;
+    updateCheckAll();
   }
 });
+
+$("#parse-list").addEventListener("click", async (e) => {
+  const exp = e.target.closest(".expand-btn");
+  if (exp) {
+    const it = parseItems[+exp.dataset.i];
+    it.expanded = !it.expanded;
+    renderParseResults();
+    return;
+  }
+  const collBtn = e.target.closest(".coll-btn");
+  if (collBtn) {
+    const i = +collBtn.dataset.i;
+    const it = parseItems[i];
+    collBtn.disabled = true;
+    collBtn.textContent = "正在拉取合集列表…";
+    try {
+      const c = it.collection;
+      const data = await api(`/api/collection?platform=${encodeURIComponent(c.platform)}&id=${encodeURIComponent(c.id)}`);
+      it.sections = [{
+        label: `合集《${data.name || "合集"}》· ${data.entries.length} 集`,
+        entries: data.entries.map((x) => ({ ...x, checked: true })),
+      }];
+      it.expanded = true;
+      delete it.collection;
+      renderParseResults();
+    } catch (err) {
+      toast(err.message, "err", 5000);
+      collBtn.disabled = false;
+      collBtn.textContent = "合集拉取失败 · 点击重试";
+    }
+  }
+});
+
 $("#check-all").addEventListener("change", (e) => {
-  parseItems.forEach((p) => { if (p.ok) p.checked = e.target.checked; });
+  parseItems.forEach((p) => {
+    if (!p.ok) return;
+    if (p.sections) p.sections.forEach((s) => s.entries.forEach((en) => { en.checked = e.target.checked; }));
+    else p.checked = e.target.checked;
+  });
   renderParseResults();
 });
 
 $("#btn-download-selected").addEventListener("click", async () => {
-  const text = parseItems.filter((p) => p.ok && p.checked).map((p) => p.url).join("\n");
-  if (!text) { toast("请至少勾选一个视频", "warn"); return; }
+  const urls = [];
+  parseItems.forEach((p) => {
+    if (!p.ok) return;
+    if (p.sections) p.sections.forEach((s) => s.entries.forEach((en) => { if (en.checked) urls.push(en.url); }));
+    else if (p.checked) urls.push(p.url);
+  });
+  if (!urls.length) { toast("请至少勾选一个视频", "warn"); return; }
+  if (urls.length > 50) {
+    toast(`一次最多下载 50 个，已截取前 50 个`, "warn");
+    urls.length = 50;
+  }
+  const text = urls.join("\n");
   const options = {
     quality: "best",
     extract_audio: $("#opt-audio").checked,
@@ -270,7 +401,7 @@ function updateTaskEl(el, t, fresh = false) {
   const wrap = q("progressWrap");
   const bar = q("bar");
   setClass(wrap, "progress" + (t.status === "done" ? " ok" : t.status === "failed" ? " err" : ""));
-  if (t.status === "parsing") {
+  if (t.status === "parsing" || t.status === "working") {
     setClass(bar, "progress-bar indeterminate");
   } else if (t.status === "pending") {
     setClass(bar, "progress-bar");
@@ -348,6 +479,8 @@ async function pollTasks(force = false) {
       `</span>`;
     if ($("#tasks-head").hidden) $("#tasks-head").hidden = false;
     if ($("#task-summary").innerHTML !== summaryHtml) $("#task-summary").innerHTML = summaryHtml;
+    $("#btn-retry-all").hidden = !failed;
+    $("#btn-clear-tasks").hidden = !(failed || tasks.some((t) => t.status === "duplicate"));
     renderTasks(tasks);
     // 播放头：有任务在跑时顶部的"时间线指针"亮起
     const running = tasks.some((t) => ["parsing", "pending", "downloading", "processing"].includes(t.status));
@@ -364,10 +497,29 @@ window.retryTask = async (id) => {
   } catch (e) { toast(e.message, "err"); }
 };
 
+$("#btn-retry-all").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/tasks/retry_all", { method: "POST" });
+    toast(r.retried ? `已重新入队 ${r.retried} 个任务` : "没有失败任务");
+    pollTasks(true);
+  } catch (e) { toast(e.message, "err"); }
+});
+
+$("#btn-clear-tasks").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/tasks/clear", { method: "POST" });
+    toast(r.removed ? `已清理 ${r.removed} 条记录` : "没有可清理的记录");
+    pollTasks(true);
+  } catch (e) { toast(e.message, "err"); }
+});
+
 /* ---------- 历史页 ---------- */
 
-let historyState = { page: 1, platform: "", status: "", keyword: "", group: "date" };
+let historyState = { page: 1, platform: "", status: "", keyword: "", group: "date", favorite: 0, tag: "", view: localStorage.getItem("pacdown-view") || "grid" };
 let historyLoaded = false;   // 首次加载后才显示骨架屏，静默刷新不闪
+let manageMode = false;      // 批量管理模式
+let manageSel = new Set();   // 选中的记录 id
+let lastRenderedIds = [];    // 当前列表/分组渲染的记录 id（全选用）
 
 const GROUP_LABEL = { date: "按日期", platform: "按平台", author: "按作者" };
 
@@ -384,11 +536,13 @@ async function loadHistory(silent = false) {
     grid.innerHTML = Array(6).fill(`<div class="skeleton"><div class="sk-cover"></div><div class="sk-line" style="width:80%"></div><div class="sk-line" style="width:55%"></div></div>`).join("");
   }
   loadStats();
+  loadTagFilter();
   const s = historyState;
   try {
     if (s.group === "none") {
       const params = new URLSearchParams({
         page: s.page, size: 24, platform: s.platform, status: s.status, keyword: s.keyword,
+        favorite: s.favorite, tag: s.tag,
       });
       const { items, total, page, size } = await api(`/api/history?${params}`);
       if (grid.querySelector(".skeleton")) delete grid.dataset.sig;
@@ -396,6 +550,7 @@ async function loadHistory(silent = false) {
     } else {
       const params = new URLSearchParams({
         platform: s.platform, status: s.status, keyword: s.keyword, group_by: s.group,
+        favorite: s.favorite, tag: s.tag,
       });
       const { groups } = await api(`/api/history/groups?${params}`);
       if (grid.querySelector(".skeleton")) delete grid.dataset.sig;
@@ -409,7 +564,7 @@ async function loadHistory(silent = false) {
 
 function renderGroups(groups) {
   const grid = $("#history-grid");
-  const sig = JSON.stringify([historyState, groups.map((g) => g.key + ":" + g.count + ":" + g.size)]);
+  const sig = JSON.stringify([historyState, groups.map((g) => g.key + ":" + g.count + ":" + g.size), manageMode]);
   if (grid.dataset.sig === sig) return;
   const isRefresh = Boolean(grid.dataset.sig);
   grid.dataset.sig = sig;
@@ -419,8 +574,10 @@ function renderGroups(groups) {
     grid.innerHTML = `<div class="empty" style="grid-column:1/-1">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 15l5-5 4 4 3-3 6 6"/></svg>
       <p>还没有下载记录<br>回到「下载」页，粘贴一个链接开始</p></div>`;
+    lastRenderedIds = [];
     return;
   }
+  lastRenderedIds = groups.flatMap((g) => g.items.map((v) => v.id));
   grid.innerHTML = groups.map((g) => {
     const cards = g.items.map((v) => hCardHTML(v, 0)).join("");
     return `<div class="group-block" style="grid-column:1/-1">
@@ -463,38 +620,91 @@ async function loadStats() {
 
 function hCardHTML(v, i) {
   const imageCount = JSON.parse(v.images || "[]").length;
-  // 封面：优先平台封面，图集无封面时回退到本地第一张图
+  // 封面：优先平台封面 → 图集首图 → 本地截帧封面
   const coverSrcVal = v.cover_url
     ? coverSrc(v.cover_url, v.platform)
-    : (imageCount ? `/api/file?id=${v.id}&type=image&index=0` : "");
+    : (imageCount ? `/api/file?id=${v.id}&type=image&index=0`
+       : (v.cover_path ? `/api/file?id=${v.id}&type=cover` : ""));
   const cover = coverSrcVal
     ? `<img src="${esc(coverSrcVal)}" loading="lazy" alt="" onerror="this.style.display='none'">` : "";
   const durOrCount = imageCount
     ? `<span class="h-dur" style="display:inline-flex;align-items:center;gap:3px">
          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.8"/><path d="M21 15.5l-5-5L5 21"/></svg>${imageCount} 图</span>`
     : (v.duration ? `<span class="h-dur">${fmtDuration(v.duration)}</span>` : "");
-  return `<div class="h-card" style="animation-delay:${Math.min(i * 30, 240)}ms" onclick="openDetail(${v.id})">
+  const sel = manageSel.has(v.id);
+  const tags = (v.tags || []).slice(0, 3).map((t) => `<span class="h-tag">#${esc(t)}</span>`).join("");
+  return `<div class="h-card ${manageMode ? "managing" : ""} ${sel ? "sel" : ""}" style="animation-delay:${Math.min(i * 30, 240)}ms" data-vid="${v.id}" onclick="cardClick(event, ${v.id})">
     <div class="h-cover">
       ${cover}
       ${durOrCount}
       <span class="h-status">${statusBadge(v.status)}</span>
+      ${v.favorite ? `<span class="h-fav" title="已收藏">★</span>` : ""}
+      ${manageMode ? `<span class="h-check ${sel ? "on" : ""}">${sel ? "✓" : ""}</span>` : ""}
     </div>
     <div class="h-body">
       <div class="h-title">${esc(v.title || "(无标题)")}</div>
       <div class="h-meta">${badge(v.platform)}<span class="author">${esc(v.author || "")}</span>
         <span class="size">${fmtSize(v.file_size)}</span></div>
+      ${tags ? `<div class="h-tags">${tags}</div>` : ""}
     </div>
   </div>`;
 }
 
-function renderHistory(items, total, page, size) {
-  const grid = $("#history-grid");
+/* 列表视图行 */
+function hRowHTML(v) {
+  const imageCount = JSON.parse(v.images || "[]").length;
+  const coverSrcVal = v.cover_url
+    ? coverSrc(v.cover_url, v.platform)
+    : (imageCount ? `/api/file?id=${v.id}&type=image&index=0`
+       : (v.cover_path ? `/api/file?id=${v.id}&type=cover` : ""));
+  const sel = manageSel.has(v.id);
+  const tags = (v.tags || []).map((t) => `<span class="h-tag">#${esc(t)}</span>`).join("");
+  return `<div class="h-row ${manageMode ? "managing" : ""} ${sel ? "sel" : ""}" data-vid="${v.id}" onclick="cardClick(event, ${v.id})">
+    ${manageMode ? `<span class="h-check-static ${sel ? "on" : ""}">${sel ? "✓" : ""}</span>` : ""}
+    ${coverSrcVal ? `<img class="h-row-cover" loading="lazy" src="${esc(coverSrcVal)}" alt="" onerror="this.style.visibility='hidden'">` : `<div class="h-row-cover"></div>`}
+    <div class="h-row-main">
+      <div class="h-row-title">${esc(v.title || "(无标题)")}${v.favorite ? ` <span class="h-fav-inline">★</span>` : ""}</div>
+      <div class="h-row-sub">${badge(v.platform)}<span>${esc(v.author || "")}</span>${tags}</div>
+    </div>
+    <div class="h-row-side num">
+      <span>${fmtSize(v.file_size)}</span>
+      <span>${imageCount ? `${imageCount} 图` : (v.duration ? fmtDuration(v.duration) : "")}</span>
+      <span>${fmtTime(v.downloaded_at)}</span>
+    </div>
+    ${statusBadge(v.status)}
+  </div>`;
+}
+
+const VIEW_ICONS = {
+  grid: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></svg>',
+  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M9 6h12M9 12h12M9 18h12M4 6h.5M4 12h.5M4 18h.5"/></svg>',
+};
+
+function updateViewBtn() {
+  $("#btn-view-toggle").innerHTML = (historyState.view === "list" ? VIEW_ICONS.grid : VIEW_ICONS.list) +
+    (historyState.view === "list" ? "网格" : "列表");
+}
+
+$("#btn-view-toggle").addEventListener("click", () => {
+  historyState.view = historyState.view === "list" ? "grid" : "list";
+  localStorage.setItem("pacdown-view", historyState.view);
+  updateViewBtn();
+  if (historyState.group !== "none") {
+    toast("列表视图在分组为「不分组」时生效", "warn");
+    return;
+  }
+  delete $("#history-grid").dataset.sig;
+  loadHistory(true);
+});
+
+function renderHistory(items, total, page, size) {  const grid = $("#history-grid");
   // 数据未变化时不重绘（避免轮询刷新时整页闪烁）
-  const sig = JSON.stringify([historyState, total, items.map((v) => v.id + ":" + v.status + ":" + v.file_size)]);
+  const sig = JSON.stringify([historyState, total, items.map((v) => v.id + ":" + v.status + ":" + v.file_size), manageMode]);
   if (grid.dataset.sig === sig) return;
   const isRefresh = Boolean(grid.dataset.sig);   // 静默刷新时卡片不再重播入场动画
   grid.dataset.sig = sig;
   grid.classList.toggle("no-anim", isRefresh);
+  lastRenderedIds = items.map((v) => v.id);
   if (!items.length) {
     grid.innerHTML = `<div class="empty" style="grid-column:1/-1">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 15l5-5 4 4 3-3 6 6"/></svg>
@@ -502,7 +712,9 @@ function renderHistory(items, total, page, size) {
     $("#pagination").innerHTML = "";
     return;
   }
-  grid.innerHTML = items.map((v, i) => hCardHTML(v, i)).join("");
+  grid.innerHTML = historyState.view === "list"
+    ? `<div class="h-list" style="grid-column:1/-1">` + items.map((v) => hRowHTML(v)).join("") + `</div>`
+    : items.map((v, i) => hCardHTML(v, i)).join("");
   // 分页
   const pages = Math.ceil(total / size);
   if (pages <= 1) { $("#pagination").innerHTML = ""; return; }
@@ -540,6 +752,97 @@ $("#history-group").addEventListener("change", (e) => {
 });
 $("#btn-export").addEventListener("click", () => {
   window.location.href = "/api/history/export";
+});
+
+/* ---------- 片库：收藏 / 标签筛选 ---------- */
+
+$("#btn-fav-filter").addEventListener("click", () => {
+  historyState.favorite = historyState.favorite ? 0 : 1;
+  $("#btn-fav-filter").classList.toggle("on", !!historyState.favorite);
+  historyState.page = 1;
+  loadHistory();
+});
+
+async function loadTagFilter() {
+  try {
+    const { tags } = await api("/api/history/tags");
+    const sel = $("#history-tag");
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">全部标签</option>` +
+      tags.map((t) => `<option value="${esc(t)}">#${esc(t)}</option>`).join("");
+    sel.value = cur;
+  } catch (e) { /* 忽略 */ }
+}
+
+$("#history-tag").addEventListener("change", (e) => {
+  historyState.tag = e.target.value; historyState.page = 1; loadHistory();
+});
+
+/* ---------- 片库：批量管理模式 ---------- */
+
+function setManageMode(on) {
+  manageMode = on;
+  manageSel.clear();
+  updateManageBar();
+  $("#manage-bar").hidden = !on;
+  $("#btn-manage").classList.toggle("on", on);
+  delete $("#history-grid").dataset.sig;  // 强制重绘（卡片要挂复选框）
+  loadHistory(true);
+}
+
+window.cardClick = (e, id) => {
+  if (!manageMode) { openDetail(id); return; }
+  if (manageSel.has(id)) manageSel.delete(id);
+  else manageSel.add(id);
+  const card = $(`.h-card[data-vid="${id}"]`);
+  if (card) {
+    const sel = manageSel.has(id);
+    card.classList.toggle("sel", sel);
+    const chk = card.querySelector(".h-check");
+    if (chk) { chk.classList.toggle("on", sel); chk.textContent = sel ? "✓" : ""; }
+  }
+  updateManageBar();
+};
+
+function updateManageBar() {
+  $("#manage-count").textContent = `已选 ${manageSel.size} 项`;
+}
+
+$("#btn-manage").addEventListener("click", () => setManageMode(!manageMode));
+$("#manage-exit").addEventListener("click", () => setManageMode(false));
+
+$("#manage-select-all").addEventListener("click", () => {
+  const allSelected = lastRenderedIds.length > 0 &&
+    lastRenderedIds.every((id) => manageSel.has(id));
+  manageSel = allSelected ? new Set() : new Set(lastRenderedIds);
+  $$("#history-grid .h-card").forEach((card) => {
+    const sel = manageSel.has(+card.dataset.vid);
+    card.classList.toggle("sel", sel);
+    const chk = card.querySelector(".h-check");
+    if (chk) { chk.classList.toggle("on", sel); chk.textContent = sel ? "✓" : ""; }
+  });
+  updateManageBar();
+});
+
+$("#manage-export").addEventListener("click", () => {
+  if (!manageSel.size) { toast("请先勾选记录", "warn"); return; }
+  window.location.href = `/api/history/export?ids=${[...manageSel].join(",")}`;
+});
+
+$("#manage-delete").addEventListener("click", async () => {
+  if (!manageSel.size) { toast("请先勾选记录", "warn"); return; }
+  if (!confirm(`删除选中的 ${manageSel.size} 条记录？`)) return;
+  const delFiles = confirm("同时删除磁盘上的文件？\n「确定」删除文件，「取消」仅删除记录");
+  try {
+    const r = await api("/api/history/batch_delete", {
+      method: "POST",
+      body: { ids: [...manageSel], keep_files: !delFiles },
+    });
+    toast(`已删除 ${r.deleted} 条记录${r.files_removed ? `，清理 ${r.files_removed} 个文件` : ""}`);
+    setManageMode(false);
+    loadHistory();
+    loadStats();
+  } catch (e) { toast(e.message, "err"); }
 });
 
 /* ---------- 详情弹窗 ---------- */
@@ -607,8 +910,12 @@ window.openDetail = async (id) => {
     $("#modal-body").innerHTML = `
       <button class="modal-close" onclick="closeModal()">✕</button>
       ${preview}
-      <h3>${esc(v.title || "(无标题)")}</h3>
+      <div class="modal-title-row">
+        <h3>${esc(v.title || "(无标题)")}</h3>
+        <button class="fav-btn ${v.favorite ? "on" : ""}" id="detail-fav" title="收藏 / 取消收藏">★</button>
+      </div>
       <div class="h-meta" style="margin-top:8px">${badge(v.platform)}<span>${esc(v.author)}</span>${statusBadge(v.status)}</div>
+      <div class="detail-tags" id="detail-tags"></div>
       <div class="modal-grid">
         ${kv("发布时间", v.publish_time)}
         ${kv("时长", fmtDuration(v.duration))}
@@ -631,9 +938,59 @@ window.openDetail = async (id) => {
       <details class="modal-raw"><summary>查看原始数据 JSON</summary>
         <pre>${esc(JSON.stringify(v.raw, null, 2))}</pre></details>
     `;
+    detailVid = v.id;
+    detailTags = [...(v.tags || [])];
+    renderDetailTags();
+    $("#detail-fav").addEventListener("click", async (e) => {
+      const on = !e.currentTarget.classList.contains("on");
+      try {
+        await api(`/api/history/${v.id}`, { method: "PATCH", body: { favorite: on } });
+        e.currentTarget.classList.toggle("on", on);
+        loadHistory(true);
+      } catch (err) { toast(err.message, "err"); }
+    });
     $("#modal").hidden = false;
   } catch (e) { toast(e.message, "err"); }
 };
+
+/* 详情弹窗的标签编辑 */
+let detailTags = [];
+let detailVid = 0;
+
+function renderDetailTags() {
+  const box = $("#detail-tags");
+  box.innerHTML = `<span class="detail-tags-label">标签</span>` +
+    detailTags.map((t, i) =>
+      `<span class="tag-chip">#${esc(t)}<span class="tag-x" data-i="${i}">✕</span></span>`).join("") +
+    `<button class="tag-add" id="detail-tag-add">+ 标签</button>`;
+}
+
+$("#modal-body").addEventListener("click", async (e) => {
+  if (!detailVid) return;
+  const x = e.target.closest(".tag-x");
+  if (x && e.target.closest("#detail-tags")) {
+    detailTags.splice(+x.dataset.i, 1);
+    renderDetailTags();
+    await saveDetailTags();
+    return;
+  }
+  if (e.target.id === "detail-tag-add") {
+    const t = prompt("新标签（不用带 #）");
+    if (t && t.trim()) {
+      detailTags.push(t.trim().replace(/^#+/, ""));
+      renderDetailTags();
+      await saveDetailTags();
+    }
+  }
+});
+
+async function saveDetailTags() {
+  try {
+    await api(`/api/history/${detailVid}`, { method: "PATCH", body: { tags: detailTags } });
+    loadHistory(true);
+    loadTagFilter();
+  } catch (e) { toast(e.message, "err"); }
+}
 
 window.closeModal = () => {
   $$("#modal-body video, #modal-body audio").forEach((el) => el.pause());
@@ -720,10 +1077,11 @@ window.redownload = async (id, url) => {
 };
 
 window.deleteVideo = async (id) => {
-  if (!confirm("删除这条记录？文件会保留在磁盘上。")) return;
+  if (!confirm("删除这条记录？")) return;
+  const delFiles = confirm("同时删除磁盘上的文件？\n「确定」删除文件，「取消」仅删除记录");
   try {
-    await api(`/api/history/${id}?keep_files=true`, { method: "DELETE" });
-    toast("记录已删除");
+    await api(`/api/history/${id}?keep_files=${!delFiles}`, { method: "DELETE" });
+    toast(delFiles ? "记录与文件已删除" : "记录已删除，文件保留");
     closeModal();
     loadHistory();
   } catch (e) { toast(e.message, "err"); }
@@ -742,12 +1100,19 @@ async function loadSubs() {
         <p>还没有订阅<br>粘贴 B站 UP主空间或抖音博主主页链接，新视频自动下载</p></div>`;
       return;
     }
-    box.innerHTML = items.map((s) => `
+    box.innerHTML = items.map((s) => {
+      let opts = {};
+      try { opts = JSON.parse(s.options || "{}"); } catch (e) { /* 忽略 */ }
+      const optChips = [
+        opts.extract_audio ? '<span class="h-tag">自动MP3</span>' : "",
+        opts.download_danmaku ? '<span class="h-tag">自动弹幕</span>' : "",
+      ].join("");
+      return `
       <div class="sub-card glass ${s.enabled ? "" : "sub-paused"}">
         <img class="sub-avatar" src="${esc(coverSrc(s.avatar_url, s.platform))}" alt=""
              onerror="this.style.visibility='hidden'">
         <div class="sub-info">
-          <div class="sub-name">${esc(s.uploader_name)} ${badge(s.platform)}</div>
+          <div class="sub-name">${esc(s.uploader_name)} ${badge(s.platform)} ${optChips}</div>
           <div class="sub-meta">上次检查：${fmtTime(s.last_checked) || "从未"} · 已抓取 ${s.new_count} 个</div>
           ${s.last_error ? `<div class="sub-err" title="${esc(s.last_error)}">${esc(s.last_error)}</div>` : ""}
         </div>
@@ -756,7 +1121,8 @@ async function loadSubs() {
           <button class="btn btn-ghost btn-sm" onclick="toggleSub(${s.id}, ${s.enabled ? 0 : 1})">${s.enabled ? "暂停" : "恢复"}</button>
           <button class="btn btn-danger btn-sm" onclick="removeSub(${s.id})">删除</button>
         </div>
-      </div>`).join("");
+      </div>`;
+    }).join("");
   } catch (e) { box.innerHTML = `<div class="empty" style="grid-column:1/-1"><p>${esc(e.message)}</p></div>`; }
 }
 
@@ -764,7 +1130,11 @@ $("#btn-add-sub").addEventListener("click", async () => {
   const url = $("#sub-url").value.trim();
   if (!url) { toast("请输入博主主页链接", "warn"); return; }
   try {
-    await api("/api/subscriptions", { method: "POST", body: { url } });
+    await api("/api/subscriptions", {
+      method: "POST",
+      body: { url, extract_audio: $("#sub-opt-audio").checked,
+              download_danmaku: $("#sub-opt-danmaku").checked },
+    });
     toast("订阅已添加，将按设置间隔自动检查");
     $("#sub-url").value = "";
     loadSubs();
@@ -961,6 +1331,327 @@ $("#repost-history").addEventListener("click", async (e) => {
   } catch (err) { toast("复制失败", "err"); }
 });
 
+/* ---------- 工具箱 ---------- */
+
+let toolsMeta = null;
+let toolSrc = null;          // {video_id, title} | {upload, media, title}
+let toolKind = "transcode";
+let sourceTab = "video";     // video | images
+let toolSources = [];
+
+const TOOL_PARAM_DEFS = {
+  transcode: [
+    { k: "vcodec", label: "编码", type: "select", def: "h264",
+      options: [["h264", "H.264 兼容好"], ["h265", "H.265 更省空间"], ["vp9", "VP9"], ["copy", "仅换封装"]] },
+    { k: "resolution", label: "分辨率", type: "select", def: "source",
+      options: [["source", "保持原分辨率"], ["1080", "1080p"], ["720", "720p"], ["480", "480p"]] },
+    { k: "crf", label: "CRF（越小越清晰）", type: "number", def: 23, min: 15, max: 40 },
+  ],
+  compress: [
+    { k: "crf", label: "CRF（越大文件越小）", type: "number", def: 28, min: 18, max: 40 },
+    { k: "preset", label: "速度档位", type: "select", def: "medium",
+      options: [["fast", "快"], ["medium", "均衡"], ["slow", "慢（更小）"]] },
+  ],
+  trim: [
+    { k: "start", label: "开始时间", type: "text", def: "00:00:00", ph: "如 00:01:30" },
+    { k: "end", label: "结束时间", type: "text", def: "", ph: "留空表示到结尾" },
+  ],
+  gif: [
+    { k: "start", label: "开始时间", type: "text", def: "0", ph: "秒或 00:00:05" },
+    { k: "duration", label: "时长（秒）", type: "number", def: 5, min: 1, max: 30 },
+    { k: "fps", label: "帧率", type: "number", def: 12, min: 5, max: 30 },
+    { k: "width", label: "宽度（像素）", type: "number", def: 480, min: 120, max: 1280 },
+  ],
+  watermark: [
+    { k: "text", label: "水印文字", type: "text", def: "", ph: "如 @我的账号" },
+    { k: "position", label: "位置", type: "select", def: "br",
+      options: [["br", "右下"], ["bl", "左下"], ["tr", "右上"], ["tl", "左上"], ["center", "居中"]] },
+    { k: "fontsize", label: "字号", type: "number", def: 32, min: 12, max: 120 },
+    { k: "opacity", label: "不透明度（0-1）", type: "number", def: 0.7, min: 0.1, max: 1, step: 0.1 },
+  ],
+  frame: [
+    { k: "at", label: "截取位置", type: "text", def: "20%", ph: "百分比或秒数，如 50% / 12.5" },
+  ],
+  img_convert: [
+    { k: "format", label: "目标格式", type: "select", def: "webp",
+      options: [["webp", "WebP（最小）"], ["jpg", "JPG"], ["png", "PNG"]] },
+    { k: "quality", label: "质量（10-95）", type: "number", def: 85, min: 10, max: 95 },
+    { k: "max_width", label: "最大宽度（0=原尺寸）", type: "number", def: 0, min: 0, max: 4096 },
+  ],
+  img_join: [
+    { k: "max_width", label: "拼接宽度（像素）", type: "number", def: 1080, min: 200, max: 4096 },
+  ],
+  img_zip: [],
+};
+
+async function loadToolbox() {
+  if (!toolsMeta) {
+    try {
+      toolsMeta = await api("/api/toolbox/tools");
+      $("#tools-ffmpeg-notice").hidden = !!toolsMeta.ffmpeg;
+      renderToolKinds();
+      renderToolParams();
+    } catch (e) { toast(e.message, "err"); return; }
+  }
+  loadToolSources("");
+  pollToolJobs();
+}
+
+function isVideoTool() { return toolsMeta.video_tools.includes(toolKind); }
+
+function renderToolKinds() {
+  const row = $("#tool-kind-row");
+  const mk = (k) => `<button class="tool-chip ${k === toolKind ? "active" : ""}" data-k="${k}">${toolsMeta.tools[k]}</button>`;
+  row.innerHTML =
+    `<span class="tool-group-label">视频</span>` + toolsMeta.video_tools.map(mk).join("") +
+    `<span class="tool-group-label">图片</span>` + toolsMeta.image_tools.map(mk).join("");
+}
+
+$("#tool-kind-row").addEventListener("click", (e) => {
+  const chip = e.target.closest(".tool-chip");
+  if (!chip) return;
+  toolKind = chip.dataset.k;
+  renderToolKinds();
+  renderToolParams();
+  // 工具族与素材Tab联动
+  const wantTab = isVideoTool() ? "video" : "images";
+  if (wantTab !== sourceTab) {
+    sourceTab = wantTab;
+    $$(".picker-tab").forEach((t) => t.classList.toggle("active", t.dataset.kind === sourceTab));
+    loadToolSources($("#tools-search").value.trim());
+  }
+});
+
+function renderToolParams() {
+  const defs = TOOL_PARAM_DEFS[toolKind] || [];
+  const box = $("#tool-params");
+  if (!defs.length) {
+    box.innerHTML = `<p class="hint" style="margin:4px 0 0">该工具无参数，选好素材后直接开始</p>`;
+    return;
+  }
+  box.innerHTML = defs.map((d) => {
+    if (d.type === "select") {
+      return `<label class="field-inline">${d.label}
+        <select class="select" data-k="${d.k}">${d.options.map(([v, t]) =>
+          `<option value="${v}" ${v === d.def ? "selected" : ""}>${t}</option>`).join("")}</select>
+      </label>`;
+    }
+    return `<label class="field-inline">${d.label}
+      <input type="${d.type}" data-k="${d.k}" value="${esc(d.def)}" placeholder="${esc(d.ph || "")}"
+             ${d.min != null ? `min="${d.min}"` : ""} ${d.max != null ? `max="${d.max}"` : ""} ${d.step ? `step="${d.step}"` : ""}>
+    </label>`;
+  }).join("");
+}
+
+async function loadToolSources(keyword) {
+  const box = $("#tools-source-list");
+  try {
+    const { items } = await api(`/api/toolbox/sources?keyword=${encodeURIComponent(keyword)}`);
+    toolSources = items;
+    const filtered = items.filter((v) => v.kind === sourceTab);
+    if (!filtered.length) {
+      box.innerHTML = `<div class="empty" style="padding:26px 10px"><p>${sourceTab === "video" ? "没有已完成视频" : "没有图集"}${keyword ? "（无匹配）" : ""}</p></div>`;
+      return;
+    }
+    box.innerHTML = filtered.map((v) => `
+      <div class="rp-item ${toolSrc?.video_id === v.id ? "sel" : ""}" data-vid="${v.id}">
+        <img class="rp-thumb" src="${v.cover_url ? esc(coverSrc(v.cover_url, v.platform)) : (v.cover_path ? `/api/file?id=${v.id}&type=cover` : "")}"
+             onerror="this.style.visibility='hidden'">
+        <div class="rp-info">
+          <div class="rp-title">${esc(v.title || "(无标题)")}</div>
+          <div class="rp-meta">${PLATFORM_NAME[v.platform] || v.platform} · ${v.kind === "images" ? `${v.image_count} 张图` : esc(v.author || "")}</div>
+        </div>
+      </div>`).join("");
+  } catch (e) {
+    box.innerHTML = `<div class="empty" style="padding:26px 10px"><p>${esc(e.message)}</p></div>`;
+  }
+}
+
+$$(".picker-tab").forEach((t) => t.addEventListener("click", () => {
+  sourceTab = t.dataset.kind;
+  $$(".picker-tab").forEach((x) => x.classList.toggle("active", x === t));
+  // 自动切到匹配素材族的第一个工具
+  if (sourceTab === "video" && !isVideoTool()) { toolKind = "transcode"; renderToolKinds(); renderToolParams(); }
+  if (sourceTab === "images" && isVideoTool()) { toolKind = "img_convert"; renderToolKinds(); renderToolParams(); }
+  loadToolSources($("#tools-search").value.trim());
+}));
+
+$("#tools-search").addEventListener("input", (e) => {
+  clearTimeout($("#tools-search")._t);
+  $("#tools-search")._t = setTimeout(() => loadToolSources(e.target.value.trim()), 350);
+});
+
+$("#tools-source-list").addEventListener("click", (e) => {
+  const item = e.target.closest(".rp-item");
+  if (!item) return;
+  const vid = +item.dataset.vid;
+  const v = toolSources.find((x) => x.id === vid);
+  toolSrc = { video_id: vid, title: v?.title || `#${vid}` };
+  $("#tools-upload-name").textContent = "";
+  $$("#tools-source-list .rp-item").forEach((el) => el.classList.toggle("sel", el === item));
+  updateToolSrcTip();
+});
+
+$("#btn-tools-upload").addEventListener("click", () => $("#tools-file").click());
+$("#tools-file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const r = await fetch("/api/toolbox/upload", { method: "POST", body: fd });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || "上传失败");
+    toolSrc = { upload: data.name, media: data.media, title: file.name };
+    $("#tools-upload-name").textContent = `已上传：${file.name}`;
+    $$("#tools-source-list .rp-item").forEach((el) => el.classList.remove("sel"));
+    // 上传图片时自动切到图片工具
+    if (data.media === "image" && isVideoTool()) {
+      toolKind = "img_convert"; renderToolKinds(); renderToolParams();
+      sourceTab = "images";
+      $$(".picker-tab").forEach((t) => t.classList.toggle("active", t.dataset.kind === "images"));
+    }
+    updateToolSrcTip();
+  } catch (err) { toast(err.message, "err"); }
+  e.target.value = "";
+});
+
+function updateToolSrcTip() {
+  $("#tool-src-tip").textContent = toolSrc ? `素材：${toolSrc.title}` : "未选择素材";
+}
+
+$("#btn-tool-run").addEventListener("click", async () => {
+  if (!toolSrc) { toast("请先在左侧选择素材或上传文件", "warn"); return; }
+  const params = {};
+  $$("#tool-params [data-k]").forEach((el) => { params[el.dataset.k] = el.value; });
+  const body = { kind: toolKind, params };
+  if (toolSrc.video_id) body.video_id = toolSrc.video_id;
+  else body.upload = toolSrc.upload;
+  const btn = $("#btn-tool-run");
+  btn.disabled = true;
+  try {
+    await api("/api/toolbox/jobs", { method: "POST", body });
+    toast("已加入处理队列");
+    pollToolJobs();
+  } catch (e) { toast(e.message, "err", 5000); }
+  finally { btn.disabled = false; }
+});
+
+async function pollToolJobs() {
+  try {
+    const { items } = await api("/api/toolbox/jobs");
+    const box = $("#tool-jobs");
+    if (!items.length) {
+      box.innerHTML = `<div class="empty"><p>还没有处理任务</p></div>`;
+      return;
+    }
+    const KIND_NAME = toolsMeta?.tools || {};
+    box.innerHTML = items.map((j) => `
+      <div class="tool-job glass">
+        <div class="tj-head">
+          <span class="tj-kind">${KIND_NAME[j.kind] || j.kind}</span>
+          ${statusBadge(j.status)}
+          <span class="tj-time num">${fmtTime(j.created_at)}</span>
+          <div class="tj-actions">
+            ${j.status === "done" && j.has_output
+              ? Array.from({ length: j.outputs }, (_, i) =>
+                  `<a class="btn btn-ghost btn-sm" href="/api/toolbox/jobs/${j.id}/file?index=${i}" download>下载${j.outputs > 1 ? ` ${i + 1}` : ""}</a>`).join("")
+              : ""}
+            <button class="btn btn-ghost btn-sm" onclick="deleteToolJob(${j.id})">删除</button>
+          </div>
+        </div>
+        ${j.status === "running" || j.status === "pending"
+          ? `<div class="progress"><div class="progress-bar striped" style="width:${j.progress || 2}%"></div></div>` : ""}
+        ${j.error ? `<div class="task-err">${esc(j.error)}</div>` : ""}
+      </div>`).join("");
+  } catch (e) { /* 忽略 */ }
+}
+
+window.deleteToolJob = async (id) => {
+  const delFiles = confirm("删除该任务记录？\n「确定」同时删除产物文件，「取消」仅删记录");
+  try {
+    await api(`/api/toolbox/jobs/${id}?keep_files=${!delFiles}`, { method: "DELETE" });
+    pollToolJobs();
+  } catch (e) { toast(e.message, "err"); }
+};
+
+/* ---------- 通知中心 ---------- */
+
+let notifFirst = true;
+let lastUnread = 0;
+let notifCache = [];
+
+async function pollNotifications(first = false) {
+  try {
+    const d = await api("/api/notifications?limit=30");
+    notifCache = d.items;
+    const badge = $("#bell-badge");
+    badge.hidden = !d.unread;
+    badge.textContent = d.unread > 99 ? "99+" : d.unread;
+    if ((first || notifFirst) === false && d.unread > lastUnread && d.items.length) {
+      notifyDesktop(d.items[0]);
+      if (!$("#notif-drawer").hidden) renderNotifList();
+    }
+    notifFirst = false;
+    lastUnread = d.unread;
+  } catch (e) { /* 忽略 */ }
+}
+
+function notifyDesktop(n) {
+  toast(n.title, n.kind === "task" ? "err" : "ok");
+  if (window.Notification && Notification.permission === "granted") {
+    try { new Notification(`PacDown · ${n.title}`, { body: n.body || "" }); } catch (e) { /* 忽略 */ }
+  }
+}
+
+function renderNotifList() {
+  const box = $("#notif-list");
+  if (!notifCache.length) {
+    box.innerHTML = `<div class="empty" style="padding:30px 10px"><p>暂无通知</p></div>`;
+    return;
+  }
+  const icons = { subscription: "🔔", task: "⚠️", system: "ℹ️" };
+  box.innerHTML = notifCache.map((n) => `
+    <div class="notif-item ${n.read ? "" : "unread"}">
+      <span class="notif-icon">${icons[n.kind] || icons.system}</span>
+      <div class="notif-body">
+        <div class="notif-title">${esc(n.title)}</div>
+        ${n.body ? `<div class="notif-text">${esc(n.body)}</div>` : ""}
+        <div class="notif-time num">${esc(n.created_at)}</div>
+      </div>
+    </div>`).join("");
+}
+
+$("#bell").addEventListener("click", async () => {
+  const drawer = $("#notif-drawer");
+  const opening = drawer.hidden;
+  drawer.hidden = !opening;
+  $("#notif-mask").hidden = !opening;
+  if (opening) {
+    renderNotifList();
+    if (window.Notification && Notification.permission === "default") {
+      try { await Notification.requestPermission(); } catch (e) { /* 忽略 */ }
+    }
+    if (lastUnread) {
+      await api("/api/notifications/read", { method: "POST", body: {} });
+      lastUnread = 0;
+      $("#bell-badge").hidden = true;
+      notifCache = notifCache.map((n) => ({ ...n, read: 1 }));
+      renderNotifList();
+    }
+  }
+});
+$("#notif-mask").addEventListener("click", () => {
+  $("#notif-drawer").hidden = true;
+  $("#notif-mask").hidden = true;
+});
+$("#notif-read-all").addEventListener("click", async () => {
+  await api("/api/notifications/read", { method: "POST", body: {} });
+  lastUnread = 0;
+  $("#bell-badge").hidden = true;
+  pollNotifications();
+});
+
 /* ---------- 设置页 ---------- */
 
 const COOKIE_FIELDS = [
@@ -977,6 +1668,7 @@ async function loadSettings() {
     $("#set-download-dir").value = cfg.download_dir || "";
     $("#set-concurrency").value = cfg.max_concurrency;
     $("#set-quality").value = cfg.default_quality;
+    $("#set-name-template").value = cfg.name_template || "{date}_{title}";
     $("#set-sub-interval").value = cfg.subscription_interval;
     $("#set-proxy").value = cfg.http_proxy || "";
     $("#set-ai-url").value = cfg.ai_base_url || "";
@@ -995,6 +1687,7 @@ $("#btn-save-settings").addEventListener("click", async () => {
     download_dir: $("#set-download-dir").value.trim(),
     max_concurrency: +$("#set-concurrency").value || 3,
     default_quality: $("#set-quality").value.trim() || "best",
+    name_template: $("#set-name-template").value.trim() || "{date}_{title}",
     subscription_interval: +$("#set-sub-interval").value || 30,
     http_proxy: $("#set-proxy").value.trim(),
     ai_base_url: $("#set-ai-url").value.trim(),
@@ -1018,9 +1711,15 @@ $("#btn-save-settings").addEventListener("click", async () => {
 
 async function boot() {
   loadDirs();
+  updateViewBtn();
   pollTasks();
+  pollNotifications(true);
   setInterval(() => {
-    if (!document.hidden) pollTasks();
+    if (!document.hidden) {
+      pollTasks();
+      pollNotifications();
+      if ($("#page-tools").classList.contains("active")) pollToolJobs();
+    }
   }, 1500);
   loadStats(); // 预热顶部统计（不预热列表，避免与切页加载竞态）
 }

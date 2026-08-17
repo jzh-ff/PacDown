@@ -21,6 +21,57 @@ def _extract_bvid(url: str) -> str:
     return ""
 
 
+def _extract_page_no(url: str) -> int:
+    """URL 中的 ?p=N 分P序号（从 1 开始），无则 0。"""
+    m = re.search(r"[?&]p=(\d+)", url)
+    return int(m.group(1)) if m else 0
+
+
+def list_related(url: str) -> dict:
+    """列出该视频的分P与所属合集（供批量下载）。
+
+    返回 {"parts": [...], "season": {...} | None}；entries 元素：
+    {url, title, cover, duration, index}。异常时返回空结构。
+    """
+    out = {"parts": [], "season": None}
+    bvid = _extract_bvid(url)
+    if not bvid.startswith("BV"):
+        return out
+    try:
+        view = BilibiliParser()._web_view(bvid)
+    except Exception:
+        return out
+    pages = view.get("pages") or []
+    if len(pages) > 1:
+        out["parts"] = [{
+            "url": f"https://www.bilibili.com/video/{bvid}?p={p.get('page', i)}",
+            "title": p.get("part") or f"P{p.get('page', i)}",
+            "cover": p.get("first_frame") or "",
+            "duration": int(p.get("duration") or 0),
+            "index": p.get("page", i),
+        } for i, p in enumerate(pages, 1)]
+    season = view.get("ugc_season") or {}
+    sections = season.get("sections") or []
+    episodes = [ep for s in sections for ep in (s.get("episodes") or [])]
+    if episodes:
+        entries = []
+        for i, ep in enumerate(episodes, 1):
+            eb = ep.get("bvid") or ""
+            if not eb:
+                continue
+            entries.append({
+                "url": f"https://www.bilibili.com/video/{eb}",
+                "title": ep.get("title") or eb,
+                "cover": (ep.get("arc") or {}).get("pic") or "",
+                "duration": 0,
+                "index": i,
+            })
+        if entries:
+            out["season"] = {"title": season.get("title") or "合集",
+                             "entries": entries}
+    return out
+
+
 @register
 class BilibiliParser(Parser):
     platform = "bilibili"
@@ -58,10 +109,25 @@ class BilibiliParser(Parser):
         )
 
         # 用网页 API 补充精确发布时间/分区等（失败不影响主流程）
+        view = {}
         try:
-            vi.raw["web_view"] = self._web_view(bvid)
+            view = self._web_view(bvid)
+            vi.raw["web_view"] = view
         except Exception:
             pass
+
+        # ?p=N 分P：video_id 加后缀避免各分P互相判重，标题换成分P名
+        p_no = _extract_page_no(url)
+        if p_no > 0 and bvid:
+            pages = view.get("pages") or []
+            if p_no <= len(pages):
+                pg = pages[p_no - 1]
+                vi.video_id = f"{bvid}_p{p_no}"
+                vi.title = pg.get("part") or vi.title
+                vi.duration = int(pg.get("duration") or vi.duration or 0)
+                vi.cover_url = pg.get("first_frame") or vi.cover_url
+                if not vi.title or vi.title == (view.get("title") or ""):
+                    vi.title = f"{view.get('title') or ''} P{p_no}"
         return vi
 
     def _web_view(self, bvid: str) -> dict:
@@ -78,8 +144,16 @@ class BilibiliParser(Parser):
         return data.get("data") or {}
 
     def get_cid(self, bvid: str) -> int | None:
+        # 兼容分P id（{bvid}_p{N}）：取对应分P的 cid
+        p_no = 0
+        m = re.match(r"(BV[0-9A-Za-z]{10})_p(\d+)$", bvid)
+        if m:
+            bvid, p_no = m.group(1), int(m.group(2))
         view = self._web_view(bvid)
-        cid = view.get("cid") or (view.get("pages") or [{}])[0].get("cid")
+        pages = view.get("pages") or []
+        if p_no and p_no <= len(pages):
+            return pages[p_no - 1].get("cid") or None
+        cid = view.get("cid") or (pages[0].get("cid") if pages else None)
         return cid if cid else None
 
     def download(self, info, dest_dir: str, options: dict, progress,

@@ -107,10 +107,12 @@ class KuaishouParser(Parser):
                 if photo.get(k) is not None}},
         )
 
-    def download(self, info: VideoInfo, dest_dir: str, options: dict, progress) -> dict:
+    def download(self, info: VideoInfo, dest_dir: str, options: dict, progress,
+                 filename_prefix: str = "") -> dict:
         direct = (info.raw or {}).get("direct_url") or ""
         if not direct:
             raise ParseError("缺少直链，请重新解析")
-        p = Path(dest_dir) / f"{hd.safe_filename(info.title)}.mp4"
+        base = filename_prefix or hd.safe_filename(info.title)
+        p = Path(dest_dir) / f"{base}.mp4"
         return hd.stream_download(direct, p, "kuaishou", progress,
                                   referer="https://www.kuaishou.com/", mobile=True)

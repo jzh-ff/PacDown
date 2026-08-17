@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from datetime import datetime
@@ -15,6 +16,23 @@ import httpx
 from . import config, database, postprocess
 from .parsers import dispatch, ParseError
 from .parsers.http_download import REFERERS, safe_filename
+
+
+def render_name(template: str, task: dict) -> str:
+    """按命名模板渲染文件名主体。变量：{date} {title} {author} {platform} {id}。"""
+    date = (task["publish_time"] or "")[:10].replace("-", "") \
+        or datetime.now().strftime("%Y%m%d")
+    mapping = {
+        "date": date,
+        "title": task["title"] or task["video_id"] or "video",
+        "author": task["author"] or "未知作者",
+        "platform": task["platform"],
+        "id": task["video_id"] or str(task["id"]),
+    }
+    out = template or "{date}_{title}"
+    for k, v in mapping.items():
+        out = out.replace("{" + k + "}", str(v))
+    return out
 
 
 class DownloadManager:
@@ -71,15 +89,15 @@ class DownloadManager:
 
     def _worker(self):
         while not self._stop.is_set():
-            # 优先处理待解析任务（parsing → pending）
-            task = database.query_one(
-                "SELECT * FROM videos WHERE status='parsing' ORDER BY id LIMIT 1")
+            # 优先处理待解析任务（parsing → working 原子认领，防多 worker 重复执行）
+            task = database.claim_task("parsing", "working")
             if task:
                 try:
                     task = self._parse_stage(task)
                 except Exception as e:
                     database.update_video(task["id"], status="failed",
                                           error=str(e)[:500], speed="")
+                    self._notify_failure(task, str(e))
                     task = None
                 if task:
                     try:
@@ -87,10 +105,10 @@ class DownloadManager:
                     except Exception as e:
                         database.update_video(task["id"], status="failed",
                                               error=str(e)[:500], speed="")
+                        self._notify_failure(task, str(e))
                 continue
-            # 再取已就绪的下载任务
-            task = database.query_one(
-                "SELECT * FROM videos WHERE status='pending' ORDER BY id LIMIT 1")
+            # 再取已就绪的下载任务（pending → downloading，原子认领）
+            task = database.claim_task("pending", "downloading")
             if not task:
                 self._wake.wait(timeout=1.5)
                 self._wake.clear()
@@ -100,8 +118,17 @@ class DownloadManager:
             except Exception as e:  # 兜底：任何异常都标记失败
                 database.update_video(task["id"], status="failed",
                                       error=str(e)[:500], speed="")
+                self._notify_failure(task, str(e))
             # 给其他 worker 抢任务的机会
             time.sleep(0.1)
+
+    @staticmethod
+    def _notify_failure(task: dict, err: str) -> None:
+        try:
+            title = (task.get("title") or task.get("source_url") or "任务")[:40]
+            database.insert_notification("task", f"《{title}》下载失败", err[:150])
+        except Exception:
+            pass
 
     def _parse_stage(self, task: dict) -> dict | None:
         """后台解析：拉取元数据、去重检查，成功则更新记录并返回（状态 pending）。"""
@@ -148,8 +175,8 @@ class DownloadManager:
         # 目标目录：下载目录/平台/作者/
         author = safe_filename(task["author"] or "未知作者", 40)
         dest_dir = Path(config.get("download_dir")) / task["platform"] / author
-        date = (task["publish_time"] or "")[:10].replace("-", "") or datetime.now().strftime("%Y%m%d")
-        prefix = safe_filename(f"{date}_{task['title'] or task['video_id']}", 90)
+        prefix = safe_filename(
+            render_name(config.get("name_template", "{date}_{title}"), task), 90)
 
         last = {"t": 0.0}
 
@@ -161,7 +188,7 @@ class DownloadManager:
 
         result = parser.download(
             _rebuild_info(task), str(dest_dir), options, progress,
-            filename_prefix=prefix if task["platform"] in ("bilibili", "generic") else "",
+            filename_prefix=prefix,
         )
         database.update_video(vid, progress=100, speed="后处理中", status="processing")
 
@@ -181,6 +208,14 @@ class DownloadManager:
                 cover_path = str((same_dir / f"{stem}_cover.jpg").resolve())
                 self._download_cover(task["cover_url"], task["platform"], cover_path)
                 fields["cover_path"] = cover_path
+            except Exception:
+                pass
+        # 无平台封面时从视频 20% 处截帧兜底（直链/无封面源）
+        if not fields.get("cover_path") and postprocess.ffmpeg_available() and \
+                Path(file_path).suffix.lower() in (".mp4", ".mkv", ".webm", ".mov", ".flv"):
+            try:
+                fields["cover_path"] = postprocess.extract_frame(
+                    file_path, str(same_dir / f"{stem}_cover.jpg"), percent=0.2)
             except Exception:
                 pass
 
@@ -235,7 +270,8 @@ class DownloadManager:
     def _bilibili_aid(self, parser, task: dict) -> int | None:
         """取B站 av 数字号（评论接口需要 aid 而非 BV 号）。"""
         try:
-            view = parser._web_view(task["video_id"])
+            bvid = re.split(r"_p\d+$", task["video_id"] or "")[0]
+            view = parser._web_view(bvid)
             return int(view.get("aid") or 0) or None
         except Exception:
             return None
@@ -289,6 +325,7 @@ class DownloadManager:
             "quality_options": info.quality_options,
             "is_images": info.is_images,
             "image_count": len(info.images),
+            "collection": (info.raw or {}).get("collection") or {},
         }
 
 

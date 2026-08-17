@@ -35,6 +35,126 @@ def _extract_item_id(url: str) -> str:
     return m.group(1) if m else ""
 
 
+def _extract_mix_id(url: str) -> str:
+    """合集页链接 douyin.com/collection/{mix_id} 的 mix_id。"""
+    m = re.search(r"/collection/(\d+)", url)
+    return m.group(1) if m else ""
+
+
+# ---------- 合集（mix） ----------
+
+def list_mix(mix_id: str, limit: int = 50) -> dict:
+    """列出合集内视频：{name, entries:[{video_id,title,url,cover,duration}]}。
+
+    路径 A（有 Cookie）：PC 合集页 SSR 数据挖掘；路径 B（免 Cookie）：
+    iesdouyin mix/aweme 接口。都失败时抛 ParseError 并附 Cookie 指引。
+    """
+    cookie = (config.get("douyin_cookie") or "").strip()
+    last_err = ""
+    if cookie:
+        try:
+            r = _mix_from_pc(mix_id, cookie, limit)
+            if r["entries"]:
+                return r
+            last_err = "Cookie 已配置但合集页未返回视频数据（Cookie 可能过期）"
+        except Exception as e:
+            last_err = f"PC 合集页请求失败：{e}"
+    try:
+        r = _mix_from_ies(mix_id, limit)
+        if r["entries"]:
+            return r
+        last_err = last_err or "接口未返回合集视频"
+    except Exception as e:
+        last_err = last_err or str(e)
+    hint = "。请在「设置 → 平台 Cookie」中粘贴抖音 Cookie 后重试（浏览器打开 douyin.com → F12 → 网络 → 任一请求的 Cookie 头），无需登录账号"
+    raise ParseError(f"抖音合集解析失败：{last_err}{hint}")
+
+
+def _mix_from_pc(mix_id: str, cookie: str, limit: int) -> dict:
+    """带 Cookie 请求 PC 合集页，从 SSR 数据挖掘 aweme 列表。"""
+    headers = {"User-Agent": UA_PC, "Referer": "https://www.douyin.com/",
+               "Cookie": cookie}
+    with httpx.Client(headers=headers, follow_redirects=True,
+                      timeout=httpx.Timeout(20, read=40),
+                      proxy=config.get("http_proxy") or None) as c:
+        r = c.get(f"https://www.douyin.com/collection/{mix_id}")
+    if r.status_code != 200:
+        raise ParseError(f"合集页返回 {r.status_code}")
+    html = r.text
+    items: list[dict] = []
+
+    def dig(obj):
+        if len(items) >= limit:
+            return
+        if isinstance(obj, dict):
+            if "aweme_id" in obj and ("desc" in obj or "video" in obj):
+                items.append(obj)
+                return
+            for v in obj.values():
+                dig(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                dig(v)
+
+    data = hd.fetch_json_in_html(html, "_ROUTER_DATA")
+    if data:
+        dig(data)
+    if not items:  # SSR 结构兜底：正则直接挖 awemeId
+        for m in re.finditer(r'"awemeId":\s*"(\d{15,})"', html):
+            items.append({"aweme_id": m.group(1)})
+            if len(items) >= limit:
+                break
+    name = ""
+    m = re.search(r'"mixName":\s*"((?:[^"\\]|\\.){1,120}?)"', html) or \
+        re.search(r'"mix_name":\s*"((?:[^"\\]|\\.){1,120}?)"', html) or \
+        re.search(r"<title>([^<]{1,120}?)</title>", html)
+    if m:
+        raw_name = m.group(1)
+        try:
+            name = json.loads(f'"{raw_name}"')
+        except (json.JSONDecodeError, ValueError):
+            name = raw_name
+        name = name.replace("_抖音", "").strip()
+    return {"name": name, "entries": [_mix_entry(it) for it in items[:limit]]}
+
+
+def _mix_from_ies(mix_id: str, limit: int) -> dict:
+    """免 Cookie：iesdouyin mix/aweme 接口（与评论接口同族，2026-08 前可用）。"""
+    out: list[dict] = []
+    cursor = 0
+    name = ""
+    with hd.client("douyin", mobile=True) as c:
+        while len(out) < limit:
+            r = c.get(f"https://www.iesdouyin.com/web/api/v2/mix/aweme/"
+                      f"?mix_id={mix_id}&cursor={cursor}&count=20&appid=1128",
+                      headers={"Referer": "https://www.douyin.com/"})
+            r.raise_for_status()
+            data = r.json()
+            awemes = data.get("aweme_list") or []
+            if not awemes:
+                break
+            out.extend(awemes)
+            mix_info = (awemes[0].get("mix_info") or {}) if awemes else {}
+            name = name or (mix_info.get("mix_name") or "")
+            if not data.get("has_more"):
+                break
+            cursor = data.get("cursor") or (cursor + len(awemes))
+    return {"name": name, "entries": [_mix_entry(it) for it in out[:limit]]}
+
+
+def _mix_entry(aweme: dict) -> dict:
+    aweme_id = str(aweme.get("aweme_id") or aweme.get("awemeId") or "")
+    video = aweme.get("video") or {}
+    cover = ((video.get("cover") or {}).get("url_list") or [""])
+    return {
+        "video_id": aweme_id,
+        "title": (aweme.get("desc") or "无标题").splitlines()[0][:80],
+        "url": f"https://www.douyin.com/video/{aweme_id}",
+        "cover": cover[0] if cover else "",
+        "duration": int(video.get("duration") or 0) // 1000,
+    }
+
+
 # ---------- PC SSR 提取 ----------
 
 def _from_pc_page(item_id: str, cookie: str) -> dict | None:
@@ -99,10 +219,20 @@ def _aweme_slim(uri: str, url: str, html: str) -> dict:
         r'"urlList":\s*\["(https?://[^"]+?)"', html)
     images = [u for u in images if "douyinpic" in u or "byteimg" in u or "aweme" in u][:40]
 
+    mix_id = nearby(r'"mixId":\s*"(\d+)"') or nearby(r'"mix_id":\s*"(\d+)"')
+    mix_name = nearby(r'"mixName":\s*"((?:[^"\\]|\\.){1,120}?)"') or nearby(
+        r'"mix_name":\s*"((?:[^"\\]|\\.){1,120}?)"')
+    if mix_name:
+        try:
+            mix_name = json.loads(f'"{mix_name}"')
+        except (json.JSONDecodeError, ValueError):
+            pass
+
     return {
         "aweme_id": nearby(r'"awemeId":\s*"(\d+)"') or nearby(r'"aweme_id":\s*(\d+)') or "",
         "desc": title,
         "author": {"nickname": nickname, "unique_id": unique_id, "short_id": ""},
+        "mix_info": {"mix_id": mix_id, "mix_name": mix_name} if mix_id else {},
         "video": {
             "play_addr": {"uri": uri, "url_list": [url]},
             "cover": {"url_list": [nearby(r'"cover":\s*\{\s*"[^"]+":\s*\[\s*"(https?://[^"]+)"')]},
@@ -202,6 +332,11 @@ class DouyinParser(Parser):
         images = [img.get("url_list", [""])[0]
                   for img in (aweme.get("images") or []) if img.get("url_list")]
         desc_full = (aweme.get("desc") or "").strip()
+        mix = aweme.get("mix_info") or {}
+        collection = {}
+        if mix.get("mix_id"):
+            collection = {"platform": "douyin", "id": str(mix["mix_id"]),
+                          "name": mix.get("mix_name") or "合集"}
 
         return VideoInfo(
             platform=self.platform,
@@ -230,13 +365,14 @@ class DouyinParser(Parser):
             quality_options=[{"id": "best", "label": "原画（无水印）", "height": 1080}],
             images=images,
             is_images=bool(images),
-            raw={"item_id": item_id, "direct_url": direct, "aweme": _slim(aweme)},
+            raw={"item_id": item_id, "direct_url": direct, "aweme": _slim(aweme),
+                 **({"collection": collection} if collection else {})},
         )
 
     def download(self, info, dest_dir: str, options: dict, progress,
                  filename_prefix: str = "") -> dict:
         dest_dir = Path(dest_dir)
-        base = hd.safe_filename(info.title)
+        base = filename_prefix or hd.safe_filename(info.title)
         if info.is_images and info.images:
             paths = []
             for i, img in enumerate(info.images, 1):
@@ -259,5 +395,5 @@ class DouyinParser(Parser):
 
 def _slim(aweme: dict) -> dict:
     keep = ("aweme_id", "desc", "create_time", "duration",
-            "statistics", "video", "images", "author")
+            "statistics", "video", "images", "author", "mix_info")
     return {k: aweme.get(k) for k in keep if aweme.get(k) is not None}

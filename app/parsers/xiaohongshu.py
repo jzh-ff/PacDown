@@ -99,9 +99,10 @@ class XiaohongshuParser(Parser):
                 if note.get(k) is not None}},
         )
 
-    def download(self, info: VideoInfo, dest_dir: str, options: dict, progress) -> dict:
+    def download(self, info: VideoInfo, dest_dir: str, options: dict, progress,
+                 filename_prefix: str = "") -> dict:
         dest_dir = Path(dest_dir)
-        base = hd.safe_filename(info.title)
+        base = filename_prefix or hd.safe_filename(info.title)
         if info.is_images:
             paths = []
             for i, img in enumerate(info.images, 1):

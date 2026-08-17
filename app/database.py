@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS videos (
     speed TEXT DEFAULT '',
     error TEXT DEFAULT '',
     options TEXT DEFAULT '{}',         -- 下载选项 JSON：quality/extract_audio/download_danmaku
+    tags TEXT DEFAULT '[]',            -- JSON 数组：用户标签
+    favorite INTEGER DEFAULT 0,        -- 收藏标记
     created_at TEXT NOT NULL,
     downloaded_at TEXT DEFAULT ''
 );
@@ -60,6 +62,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     last_checked TEXT DEFAULT '',
     last_error TEXT DEFAULT '',
     new_count INTEGER DEFAULT 0,       -- 累计自动抓到的新视频数
+    options TEXT DEFAULT '{}',         -- 每订阅覆盖选项：extract_audio/download_danmaku
     created_at TEXT NOT NULL,
     UNIQUE(platform, uploader_id)
 );
@@ -75,6 +78,30 @@ CREATE TABLE IF NOT EXISTS reposts (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_reposts_video ON reposts(video_id);
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT DEFAULT 'system',        -- subscription / task / system
+    title TEXT DEFAULT '',
+    body TEXT DEFAULT '',
+    read INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notif_read ON notifications(read, id);
+
+CREATE TABLE IF NOT EXISTS tool_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,                -- transcode/compress/trim/gif/watermark/frame/img_*
+    src TEXT DEFAULT '',               -- 源描述：video:12 / upload:xx.jpg / images:12
+    params TEXT DEFAULT '{}',          -- JSON 参数
+    status TEXT DEFAULT 'pending',     -- pending/running/done/failed
+    progress REAL DEFAULT 0,
+    out_path TEXT DEFAULT '',          -- 产物路径（多产物时为目录或 zip）
+    extra TEXT DEFAULT '[]',           -- JSON：多产物路径列表
+    error TEXT DEFAULT '',
+    created_at TEXT NOT NULL,
+    finished_at TEXT DEFAULT ''
+);
 """
 
 _conn: sqlite3.Connection | None = None
@@ -101,6 +128,9 @@ def _migrate() -> None:
     for col, ddl in (
         ("description", "ALTER TABLE videos ADD COLUMN description TEXT DEFAULT ''"),
         ("comments", "ALTER TABLE videos ADD COLUMN comments TEXT DEFAULT ''"),
+        ("tags", "ALTER TABLE videos ADD COLUMN tags TEXT DEFAULT '[]'"),
+        ("favorite", "ALTER TABLE videos ADD COLUMN favorite INTEGER DEFAULT 0"),
+        ("options", "ALTER TABLE subscriptions ADD COLUMN options TEXT DEFAULT '{}'"),
     ):
         try:
             execute(ddl)
@@ -164,15 +194,33 @@ def find_by_video_id(platform: str, video_id: str) -> dict | None:
 
 def active_tasks() -> list[dict]:
     return query(
-        "SELECT * FROM videos WHERE status IN ('pending','parsing','downloading','processing')"
+        "SELECT * FROM videos WHERE status IN ('pending','parsing','working','downloading','processing')"
         " OR (status='duplicate' AND created_at > datetime('now','localtime','-1 minute'))"
         " OR (status='done' AND downloaded_at > datetime('now','localtime','-15 seconds'))"
         " ORDER BY id DESC"
     )
 
 
-def history(platform: str = "", status: str = "", keyword: str = "",
-            page: int = 1, size: int = 24) -> tuple[list[dict], int]:
+def claim_task(from_status: str, to_status: str) -> dict | None:
+    """原子认领一个任务：防止多 worker 同时拾取同一任务重复执行。"""
+    with _lock:
+        row = conn().execute(
+            "SELECT id FROM videos WHERE status=? ORDER BY id LIMIT 1",
+            (from_status,)).fetchone()
+        if not row:
+            return None
+        cur = conn().execute(
+            "UPDATE videos SET status=? WHERE id=? AND status=?",
+            (to_status, row["id"], from_status))
+        conn().commit()
+        if cur.rowcount == 0:  # 被别的 worker 抢先
+            return None
+        return dict(conn().execute(
+            "SELECT * FROM videos WHERE id=?", (row["id"],)).fetchone())
+
+
+def _history_where(platform: str = "", status: str = "", keyword: str = "",
+                   favorite: int = 0, tag: str = "") -> tuple[str, list]:
     where, params = ["1=1"], []
     if platform:
         where.append("platform=?")
@@ -181,9 +229,20 @@ def history(platform: str = "", status: str = "", keyword: str = "",
         where.append("status=?")
         params.append(status)
     if keyword:
-        where.append("(title LIKE ? OR author LIKE ?)")
-        params.extend([f"%{keyword}%", f"%{keyword}%"])
-    cond = " AND ".join(where)
+        where.append("(title LIKE ? OR author LIKE ? OR description LIKE ?)")
+        params.extend([f"%{keyword}%", f"%{keyword}%", f"%{keyword}%"])
+    if favorite:
+        where.append("favorite=1")
+    if tag:
+        where.append("tags LIKE ?")
+        params.append(f'%"{tag}"%')
+    return " AND ".join(where), params
+
+
+def history(platform: str = "", status: str = "", keyword: str = "",
+            page: int = 1, size: int = 24,
+            favorite: int = 0, tag: str = "") -> tuple[list[dict], int]:
+    cond, params = _history_where(platform, status, keyword, favorite, tag)
     total = query_one(f"SELECT COUNT(*) AS n FROM videos WHERE {cond}", tuple(params))["n"]
     rows = query(
         f"SELECT * FROM videos WHERE {cond} ORDER BY id DESC LIMIT ? OFFSET ?",
@@ -193,19 +252,10 @@ def history(platform: str = "", status: str = "", keyword: str = "",
 
 
 def history_groups(platform: str = "", status: str = "", keyword: str = "",
-                   group_by: str = "date", limit: int = 300) -> list[dict]:
+                   group_by: str = "date", limit: int = 300,
+                   favorite: int = 0, tag: str = "") -> list[dict]:
     """分组视图：按 下载日期 / 平台 / 作者 分组展示。"""
-    where, params = ["1=1"], []
-    if platform:
-        where.append("platform=?")
-        params.append(platform)
-    if status:
-        where.append("status=?")
-        params.append(status)
-    if keyword:
-        where.append("(title LIKE ? OR author LIKE ?)")
-        params.extend([f"%{keyword}%", f"%{keyword}%"])
-    cond = " AND ".join(where)
+    cond, params = _history_where(platform, status, keyword, favorite, tag)
     rows = query(
         f"SELECT * FROM videos WHERE {cond} ORDER BY downloaded_at DESC, id DESC LIMIT ?",
         (*params, limit))
@@ -251,6 +301,49 @@ def delete_video(vid: int) -> dict | None:
     return v
 
 
+def list_tags() -> list[str]:
+    """聚合全部用户标签（按使用次数降序）。"""
+    import json as _json
+    from collections import Counter
+    counter: Counter = Counter()
+    for r in query("SELECT tags FROM videos WHERE tags NOT IN ('', '[]')"):
+        try:
+            for t in _json.loads(r["tags"] or "[]"):
+                t = str(t).strip()
+                if t:
+                    counter[t] += 1
+        except (ValueError, TypeError):
+            continue
+    return [t for t, _ in counter.most_common(100)]
+
+
+# ---------------- notifications ----------------
+
+def insert_notification(kind: str, title: str, body: str = "") -> int:
+    cur = execute(
+        "INSERT INTO notifications(kind, title, body, created_at) VALUES(?,?,?,?)",
+        (kind, title, body, now()))
+    return cur.lastrowid
+
+
+def list_notifications(limit: int = 50) -> list[dict]:
+    return query("SELECT * FROM notifications ORDER BY id DESC LIMIT ?", (limit,))
+
+
+def unread_count() -> int:
+    return query_one("SELECT COUNT(*) AS n FROM notifications WHERE read=0")["n"]
+
+
+def mark_notifications_read(ids: list[int] | None = None) -> int:
+    if ids:
+        marks = ",".join("?" * len(ids))
+        cur = execute(f"UPDATE notifications SET read=1 WHERE id IN ({marks})",
+                      tuple(ids))
+    else:
+        cur = execute("UPDATE notifications SET read=1 WHERE read=0")
+    return cur.rowcount
+
+
 # ---------------- subscriptions ----------------
 
 def insert_sub(s: dict) -> int:
@@ -277,6 +370,37 @@ def update_sub(sid: int, **fields) -> None:
 
 def delete_sub(sid: int) -> None:
     execute("DELETE FROM subscriptions WHERE id=?", (sid,))
+
+
+# ---------------- tool_jobs（工具箱任务） ----------------
+
+def insert_tool_job(j: dict) -> int:
+    j = {**j, "created_at": now()}
+    cols = ",".join(j.keys())
+    marks = ",".join(["?"] * len(j))
+    cur = execute(f"INSERT INTO tool_jobs({cols}) VALUES({marks})", tuple(j.values()))
+    return cur.lastrowid
+
+
+def update_tool_job(jid: int, **fields) -> None:
+    if fields:
+        sets = ",".join(f"{k}=?" for k in fields)
+        execute(f"UPDATE tool_jobs SET {sets} WHERE id=?", (*fields.values(), jid))
+
+
+def get_tool_job(jid: int) -> dict | None:
+    return query_one("SELECT * FROM tool_jobs WHERE id=?", (jid,))
+
+
+def list_tool_jobs(limit: int = 50) -> list[dict]:
+    return query("SELECT * FROM tool_jobs ORDER BY id DESC LIMIT ?", (limit,))
+
+
+def delete_tool_job(jid: int) -> dict | None:
+    j = get_tool_job(jid)
+    if j:
+        execute("DELETE FROM tool_jobs WHERE id=?", (jid,))
+    return j
 
 
 # ---------------- reposts（搬运文案） ----------------

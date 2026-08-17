@@ -14,6 +14,42 @@ def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def ffprobe_duration(video_path: str) -> float:
+    """视频时长（秒），失败返回 0。"""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return 0.0
+    try:
+        p = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+            capture_output=True, text=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return float((p.stdout or "").strip() or 0)
+    except (ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
+def extract_frame(video_path: str, out_path: str,
+                  at_sec: float | None = None, percent: float = 0.0) -> str:
+    """从视频截一帧存为 JPG。percent=0.2 表示 20% 处；at_sec 优先。"""
+    if not ffmpeg_available():
+        raise RuntimeError("未检测到 ffmpeg，无法截帧")
+    if at_sec is None:
+        dur = ffprobe_duration(video_path)
+        at_sec = dur * percent if dur > 0 else 2.0
+        at_sec = max(0.5, at_sec)
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{at_sec:.2f}",
+           "-i", video_path, "-frames:v", "1", "-q:v", "3", str(out)]
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if p.returncode != 0 or not out.exists():
+        raise RuntimeError(f"截帧失败：{(p.stderr or '')[:200]}")
+    return str(out.resolve())
+
+
 def extract_mp3(video_path: str, out_path: str | None = None) -> str:
     """从视频提取 MP3，成功返回路径，失败抛异常。"""
     if not ffmpeg_available():
