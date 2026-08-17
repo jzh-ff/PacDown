@@ -381,6 +381,8 @@ async function loadHistory(silent = false) {
   });
   try {
     const { items, total, page, size } = await api(`/api/history?${params}`);
+    // 若显示的是骨架屏（重新进入页或数据变化），强制重绘
+    if (grid.querySelector(".skeleton")) delete grid.dataset.sig;
     renderHistory(items, total, page, size);
     historyLoaded = true;
   } catch (e) {
