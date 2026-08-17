@@ -29,6 +29,54 @@ def extract_mp3(video_path: str, out_path: str | None = None) -> str:
     return str(out.resolve())
 
 
+def _dy_time(t) -> str:
+    """抖音 createTime 兼容：字符串原样截断，数字按时间戳格式化。"""
+    if not t:
+        return ""
+    s = str(t)
+    if len(s) == 10 and s.isdigit():
+        from datetime import datetime
+        try:
+            return datetime.fromtimestamp(int(s)).strftime("%Y-%m-%d %H:%M")
+        except (ValueError, OSError):
+            return s
+    return s[:16]
+
+
+def fetch_douyin_comments(aweme_id: str, count: int = 20) -> list[dict]:
+    """抓取抖音评论（iesdouyin v2 接口，免 Cookie，2026-08 实测可用）。"""
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
+                       "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 "
+                       "Mobile/15E148 Safari/604.1"),
+        "Referer": "https://www.douyin.com/",
+    }
+    cookie = config.get("douyin_cookie", "")
+    if cookie:
+        headers["Cookie"] = cookie
+    url = (f"https://www.iesdouyin.com/web/api/v2/comment/list/"
+           f"?aweme_id={aweme_id}&cursor=0&count={count}&appid=1128")
+    with httpx.Client(timeout=15, proxy=config.get("http_proxy") or None) as c:
+        r = c.get(url, headers=headers)
+        r.raise_for_status()
+        data = r.json()
+    comments = data.get("comments") or []
+    out = []
+    for cm in comments:
+        user = cm.get("user") or {}
+        text = (cm.get("text") or "").strip()
+        if not text:
+            continue
+        out.append({
+            "user": user.get("nickname") or "",
+            "content": text,
+            "like": cm.get("digg_count") or 0,
+            "time": _dy_time(cm.get("createTime")),
+            "ip": str(cm.get("ip_label") or ""),
+        })
+    return out
+
+
 def fetch_bilibili_comments(aid: int, count: int = 20) -> list[dict]:
     """抓取B站视频热评第一页（免登录接口）。aid 为 av 号数字。"""
     headers = {

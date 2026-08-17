@@ -195,13 +195,18 @@ class DownloadManager:
                 fields["danmaku_path"] = ""
                 database.update_video(vid, error=f"弹幕失败：{str(e)[:100]}")
 
-        # B站评论（热评第一页）
-        if task["platform"] == "bilibili" and options.get("fetch_comments"):
+        # 评论抓取：B站热评（av 号）/ 抖音热评（ies v2 免登录接口）
+        if options.get("fetch_comments"):
             try:
-                aid = self._bilibili_aid(parser, task)
-                if aid:
-                    comments = postprocess.fetch_bilibili_comments(aid)
-                    fields["comments"] = json.dumps(comments, ensure_ascii=False)
+                if task["platform"] == "bilibili":
+                    aid = self._bilibili_aid(parser, task)
+                    if aid:
+                        fields["comments"] = json.dumps(
+                            postprocess.fetch_bilibili_comments(aid), ensure_ascii=False)
+                elif task["platform"] == "douyin" and task.get("video_id"):
+                    fields["comments"] = json.dumps(
+                        postprocess.fetch_douyin_comments(task["video_id"]),
+                        ensure_ascii=False)
             except Exception as e:
                 database.update_video(
                     vid, error=(task["error"] or "") + f"评论失败：{str(e)[:100]}")
