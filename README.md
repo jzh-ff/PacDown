@@ -2,7 +2,7 @@
 
 本地运行的 Web 应用：粘贴链接 → 自动识别平台 → 无水印下载 → 元数据保存，支持订阅博主自动追更。
 
-![界面预览](docs/screenshots/1-download-dark.png)
+![界面预览](docs/screenshots/r1-download.png)
 
 ## 支持平台
 

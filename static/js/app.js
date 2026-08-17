@@ -334,6 +334,8 @@ async function pollTasks(force = false) {
         $("#tasks-head").hidden = true;
         $("#task-list").innerHTML = "";
       }
+      $("#playhead").classList.remove("on");
+      $("#nav-active-dot").hidden = true;
       return;
     }
     const active = tasks.filter((t) => !["done", "duplicate"].includes(t.status)).length;
@@ -347,6 +349,10 @@ async function pollTasks(force = false) {
     if ($("#tasks-head").hidden) $("#tasks-head").hidden = false;
     if ($("#task-summary").innerHTML !== summaryHtml) $("#task-summary").innerHTML = summaryHtml;
     renderTasks(tasks);
+    // 播放头：有任务在跑时顶部的"时间线指针"亮起
+    const running = tasks.some((t) => ["parsing", "pending", "downloading", "processing"].includes(t.status));
+    $("#playhead").classList.toggle("on", running);
+    $("#nav-active-dot").hidden = !running;
   } catch (e) { console.error(e); }
 }
 
