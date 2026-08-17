@@ -972,7 +972,7 @@ async function boot() {
   setInterval(() => {
     if (!document.hidden) pollTasks();
   }, 1500);
-  loadHistory(); // 预热统计
+  loadStats(); // 预热顶部统计（不预热列表，避免与切页加载竞态）
 }
 
 boot();
