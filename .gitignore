@@ -5,6 +5,9 @@ config.json
 downloads/
 data/
 
+# 部署包
+dist/
+
 # Python
 __pycache__/
 *.pyc

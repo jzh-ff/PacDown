@@ -42,6 +42,7 @@ Windows 可直接双击 `start.bat`；NAS/服务器用 `docker compose up -d`。
 - [技术架构文档](docs/技术架构文档.md)
 - [使用手册](docs/使用手册.md)（含各平台 Cookie 配置教程、网盘直链用法与 FAQ）
 - [开发文档](docs/开发文档.md)（新增平台解析器指南）
+- [部署文档](docs/部署文档.md)（打包上传服务器 / Docker / systemd）
 
 ## 说明
 
