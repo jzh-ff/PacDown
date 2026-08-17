@@ -1,0 +1,19 @@
+# 运行时数据（含用户 Cookie，禁止提交）
+config.json
+
+# 下载内容与数据库
+downloads/
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.zcode/

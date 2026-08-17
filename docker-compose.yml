@@ -1,0 +1,13 @@
+services:
+  pacdown:
+    build: .
+    container_name: pacdown
+    restart: unless-stopped
+    ports:
+      - "8300:8300"
+    volumes:
+      - ./downloads:/app/downloads          # 下载的视频
+      - ./data:/app/data                    # SQLite 数据库
+      - ./config:/app/config                # 配置（config.json 挂载到容器内自动加载）
+    environment:
+      - TZ=Asia/Shanghai
