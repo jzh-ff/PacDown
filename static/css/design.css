@@ -218,15 +218,17 @@ body {
 }
 
 .sidebar-foot { margin-top: auto; display: flex; flex-direction: column; gap: 10px; align-items: center; }
+.foot-row { display: flex; gap: 8px; width: 100%; justify-content: center; }
+.foot-row .app-dl-link, .foot-row .donate-btn { flex: 1; justify-content: center; white-space: nowrap; }
 .ver { font-size: 11px; color: var(--text-3); letter-spacing: .4px; }
 .app-dl-link {
-  display: flex; align-items: center; gap: 7px; padding: 6px 12px;
+  display: flex; align-items: center; gap: 7px; padding: 7px 10px;
   border-radius: 999px; border: 1px solid var(--brand-1);
   color: var(--brand-2); background: rgba(124, 108, 245, .08);
   font-size: 12px; text-decoration: none; transition: all .18s;
 }
 .app-dl-link:hover { background: rgba(124, 108, 245, .18); color: var(--text); }
-.app-dl-link svg { width: 14px; height: 14px; }
+.app-dl-link svg { width: 14px; height: 14px; flex: none; }
 .theme-toggle {
   width: 36px; height: 36px; border-radius: 50%; cursor: pointer;
   border: 1px solid var(--border); background: var(--surface);
@@ -1052,13 +1054,38 @@ body {
    管理统计面板
    ========================================================================== */
 .stat-unlock {
-  max-width: 420px; margin: 40px auto; padding: 34px 30px; text-align: center;
+  position: relative; max-width: 400px; margin: 9vh auto 0; padding: 38px 34px 30px;
+  text-align: center; overflow: hidden;
 }
-.unlock-icon { color: var(--brand-2); margin-bottom: 12px; }
-.unlock-icon svg { width: 34px; height: 34px; }
-.stat-unlock p { color: var(--text-2); font-size: 13.5px; margin-bottom: 16px; }
-.unlock-row { display: flex; gap: 10px; }
-.unlock-row input { flex: 1; }
+/* 卡片顶部一道品牌微光，锁图标自带光晕 */
+.stat-unlock::before {
+  content: ""; position: absolute; top: 0; left: 20%; right: 20%; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--brand-1), transparent);
+}
+.unlock-icon {
+  width: 52px; height: 52px; margin: 0 auto 14px; border-radius: 15px;
+  display: grid; place-items: center; color: var(--brand-2);
+  background: rgba(124, 108, 245, .1);
+  border: 1px solid rgba(124, 108, 245, .3);
+  box-shadow: 0 0 0 5px rgba(124, 108, 245, .06), 0 4px 18px rgba(94, 96, 245, .25);
+}
+.unlock-icon svg { width: 22px; height: 22px; }
+.unlock-title { font-size: 16.5px; font-weight: 700; }
+.unlock-hint { color: var(--text-2); font-size: 12.5px; margin: 6px 0 20px; }
+.unlock-row {
+  display: flex; gap: 4px; padding: 4px;
+  border: 1px solid var(--border); border-radius: 11px; background: var(--bg-2);
+  transition: border-color .2s, box-shadow .2s;
+}
+.unlock-row:focus-within {
+  border-color: var(--brand-1); box-shadow: 0 0 0 3px var(--focus);
+}
+.unlock-row input {
+  flex: 1; min-width: 0; border: 0; background: transparent;
+  padding: 8px 12px; outline: none; color: var(--text); font: inherit;
+}
+.unlock-row input::placeholder { color: var(--text-3); }
+.unlock-row .btn { flex: none; border-radius: 8px; padding: 8px 20px; }
 
 .stats-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -1109,13 +1136,13 @@ body {
 
 /* 赞赏 */
 .donate-btn {
-  display: flex; align-items: center; gap: 7px; padding: 6px 14px;
+  display: flex; align-items: center; gap: 6px; padding: 7px 12px;
   border-radius: 999px; border: 1px solid #ffd166; color: #ffd166;
   background: rgba(255, 209, 102, .08); font: inherit; font-size: 12px;
   cursor: pointer; transition: all .18s;
 }
 .donate-btn:hover { background: rgba(255, 209, 102, .18); color: #ffe1a1; }
-.donate-btn svg { width: 14px; height: 14px; }
+.donate-btn svg { width: 14px; height: 14px; flex: none; }
 .donate-card {
   position: relative; max-width: 360px; margin: 8vh auto; padding: 30px 28px 24px;
   text-align: center; border-radius: 20px;
@@ -1170,6 +1197,7 @@ body {
   .nav-item span { display: none; }
   .nav-item.active::before { left: 20%; right: 20%; top: auto; bottom: -10px; width: auto; height: 3px; border-radius: 3px 3px 0 0; }
   .sidebar-foot { margin: 0 0 0 auto; flex-direction: row; }
+  .foot-row { display: none; }   /* 手机顶栏不显示客户端/赞赏 pill */
   .ver { display: none; }
   .main { margin-left: 0; padding: 22px 18px 46px; }
   .input-row { flex-direction: column; }
