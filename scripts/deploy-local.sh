@@ -28,7 +28,8 @@ echo "==> [3/4] 上传到 $HOST"
 scp pacdown.tgz "$HOST:$DIR/"
 
 echo "==> [4/4] 触发服务器切换（模式：$MODE → $SERVER_SCRIPT）"
-ssh "$HOST" "bash $DIR/$SERVER_SCRIPT"
+# 通过 stdin 把服务器端脚本推送执行：首次部署服务器上还没有脚本，且始终用本机最新版本
+ssh "$HOST" "bash -s -- '$DIR'" < "$SERVER_SCRIPT"
 
 rm -f pacdown.tgz
 echo "✓ 发布完成"

@@ -1,10 +1,10 @@
 #!/bin/bash
-# PacDown 服务器端发布脚本（由本机 deploy-local 触发，也可手动执行）。
+# PacDown 服务器端发布脚本（本机通过 ssh "bash -s -- <目录>" 触发，也可手动执行）。
 # 流程：解包 → 依赖检查 → 目录软链原子切换 → PM2 重启 → 健康检查（失败自动回滚）。
 # 服务器只做轻量操作；Python 无需构建，包即源码。
 set -euo pipefail
 
-APP_DIR="/www/wwwroot/pacdown"
+APP_DIR="${1:-/www/wwwroot/pacdown}"
 PM2_NAME="pacdown"
 PORT="8300"
 HEALTH_URL="http://127.0.0.1:${PORT}/api/platforms"

@@ -1,9 +1,9 @@
 #!/bin/bash
-# PacDown 服务器端 Docker 发布脚本（由本机 deploy-local/deploy.ps1 触发，也可手动执行）。
+# PacDown 服务器端 Docker 发布脚本（本机通过 ssh "bash -s -- <目录>" 触发，也可手动执行）。
 # 流程：解包 → docker 构建镜像（国内镜像加速）→ 容器切换 → 健康检查（失败自动回滚镜像）。
 set -euo pipefail
 
-APP_DIR="/www/wwwroot/pacdown"
+APP_DIR="${1:-/www/wwwroot/pacdown}"
 CONTAINER="pacdown"
 IMAGE="pacdown"
 PORT="8300"
