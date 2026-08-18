@@ -378,7 +378,8 @@ class DouyinParser(Parser):
             for i, img in enumerate(info.images, 1):
                 p = dest_dir / f"{base}_{i:02d}.jpg"
                 hd.stream_download(img, p, "douyin", progress=None,
-                                   referer="https://www.douyin.com/", mobile=True)
+                                   referer="https://www.douyin.com/", mobile=True,
+                                   rate_limit=options.get("_rate_limit") or 0)
                 paths.append(str(p))
                 if progress:
                     progress(i / len(info.images) * 100, f"{i}/{len(info.images)}")
@@ -390,7 +391,8 @@ class DouyinParser(Parser):
             raise ParseError("缺少直链，请重新解析")
         p = dest_dir / f"{base}.mp4"
         return hd.stream_download(direct, p, "douyin", progress,
-                                  referer="https://www.douyin.com/", mobile=True)
+                                  referer="https://www.douyin.com/", mobile=True,
+                                  rate_limit=options.get("_rate_limit") or 0)
 
 
 def _slim(aweme: dict) -> dict:

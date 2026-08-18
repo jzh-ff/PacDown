@@ -147,7 +147,8 @@ class DirectParser(Parser):
             name = name[: -len(ext)]
         final = dest / f"{name}{ext}"
         result = hd.stream_download(
-            url, final, "", progress, referer=referer, resume=True)
+            url, final, "", progress, referer=referer, resume=True,
+            rate_limit=options.get("_rate_limit") or 0)
         if raw.get("kind") == "image":
             result["images"] = [result["file_path"]]
         return result

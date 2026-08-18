@@ -1,0 +1,15 @@
+{
+  "name": "PacDown · 全平台视频下载",
+  "short_name": "PacDown",
+  "description": "粘贴链接，自动识别平台，无水印下载视频",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f1117",
+  "theme_color": "#7c6cf5",
+  "lang": "zh-CN",
+  "icons": [
+    { "src": "/static/assets/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/static/assets/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/static/assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

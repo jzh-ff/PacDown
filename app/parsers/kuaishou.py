@@ -115,4 +115,5 @@ class KuaishouParser(Parser):
         base = filename_prefix or hd.safe_filename(info.title)
         p = Path(dest_dir) / f"{base}.mp4"
         return hd.stream_download(direct, p, "kuaishou", progress,
-                                  referer="https://www.kuaishou.com/", mobile=True)
+                                  referer="https://www.kuaishou.com/", mobile=True,
+                                  rate_limit=options.get("_rate_limit") or 0)

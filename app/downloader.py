@@ -207,6 +207,13 @@ class DownloadManager:
                 last["t"] = now
                 database.update_video(vid, progress=round(pct, 1), speed=str(speed)[:30])
 
+        # 全局限速 → 单任务限额（全局 / 并发数），0 表示不限
+        options = dict(options)
+        limit_mb = float(config.get("speed_limit_mb", 0) or 0)
+        if limit_mb > 0:
+            n = max(1, int(config.get("max_concurrency", 3)))
+            options["_rate_limit"] = int(limit_mb * 1024 * 1024 / n)
+
         result = parser.download(
             _rebuild_info(task), str(dest_dir), options, progress,
             filename_prefix=prefix,
@@ -285,6 +292,41 @@ class DownloadManager:
 
         fields.update({"status": "done", "downloaded_at": database.now(), "speed": ""})
         database.update_video(vid, **fields)
+        self._apply_auto_rules(vid, task)
+
+    @staticmethod
+    def _apply_auto_rules(vid: int, task: dict) -> None:
+        """下载完成后评估自动规则：命中的动作入工具箱队列异步执行。"""
+        from . import toolbox
+        try:
+            rules = [r for r in database.list_rules() if r["enabled"]]
+            if not rules:
+                return
+            v = database.get_video(vid) or {}
+            tags = set(json.loads(v.get("tags") or "[]"))
+            options = json.loads(task.get("options") or "{}")
+            for rule in rules:
+                mt, mv = rule["match_type"], rule["match_value"]
+                hit = (mt == "all"
+                       or (mt == "platform" and task["platform"] == mv)
+                       or (mt == "subscription"
+                           and str(options.get("from_subscription", "")) == mv)
+                       or (mt == "tag" and mv in tags))
+                if not hit:
+                    continue
+                queued = False
+                for act in json.loads(rule["actions"] or "[]"):
+                    try:
+                        toolbox.tool_manager.create(
+                            act.get("kind", ""), f"video:{vid}", act.get("params") or {})
+                        queued = True
+                    except Exception:
+                        continue
+                if queued:
+                    database.update_rule(rule["id"],
+                                         run_count=rule["run_count"] + 1)
+        except Exception:
+            pass  # 规则异常不影响下载主流程
 
     # ---------- 工具 ----------
 

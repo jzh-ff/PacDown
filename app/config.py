@@ -24,6 +24,8 @@ DEFAULTS = {
     "kuaishou_cookie": "",
     "xiaohongshu_cookie": "",
     "http_proxy": "",               # 例 http://127.0.0.1:7890
+    "speed_limit_mb": 0,            # 全局限速 MB/s（0 不限；单任务=全局/并发数）
+    "admin_key": "",                # 管理面板密钥（空=统计面板隐藏）
     "name_template": "{date}_{title}",          # 文件名模板（目录固定 平台/作者/）
     "default_quality": "best",      # best 或具体清晰度 id
     "extract_audio": False,         # 默认是否提取 MP3

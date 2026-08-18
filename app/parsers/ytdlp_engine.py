@@ -130,6 +130,8 @@ def download(url: str, dest_dir: str, platform: str, options: dict,
     cf = _cookie_file(platform)
     if cf:
         opts["cookiefile"] = cf
+    if options.get("_rate_limit"):  # 单任务限速（字节/秒）
+        opts["ratelimit"] = int(options["_rate_limit"])
     quality = options.get("quality") or config.get("default_quality", "best")
     if quality and quality != "best":
         opts["format"] = f"{quality}+bestaudio/{quality}/best"

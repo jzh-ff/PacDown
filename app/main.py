@@ -12,7 +12,7 @@ import tempfile
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 import uvicorn
@@ -38,6 +38,22 @@ else:
 app = FastAPI(title="PacDown", docs_url=None, redoc_url=None)
 
 
+@app.middleware("http")
+async def _record_visit(request: Request, call_next):
+    """访问统计：仅记页面级访问（GET /），X-Forwarded-For 兼容反代。"""
+    response = await call_next(request)
+    try:
+        if request.method == "GET" and request.url.path == "/":
+            ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
+                or (request.client.host if request.client else "")
+            ref = request.headers.get("referer") or ""
+            ref_domain = urlparse(ref).netloc.lower().replace("www.", "")
+            database.insert_visit(ip, request.headers.get("user-agent", ""), ref_domain)
+    except Exception:
+        pass  # 统计失败不影响请求
+    return response
+
+
 @app.on_event("startup")
 def _startup():
     config.load()
@@ -58,6 +74,12 @@ def _shutdown():
 @app.get("/")
 def index():
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/sw.js")
+def sw_js():
+    """Service Worker 挂根路径，获得全站作用域（/static/ 下默认作用域不够）。"""
+    return FileResponse(STATIC_DIR / "sw.js", media_type="application/javascript")
 
 
 @app.get("/api/platforms")
@@ -520,7 +542,7 @@ def cover(url: str, platform: str = ""):
 # ---------------- 配置 ----------------
 
 SENSITIVE = ("bilibili_cookie", "douyin_cookie", "kuaishou_cookie",
-             "xiaohongshu_cookie", "ai_api_key")
+             "xiaohongshu_cookie", "ai_api_key", "admin_key")
 
 
 @app.get("/api/config")
@@ -779,6 +801,142 @@ def app_download():
         raise HTTPException(404, "客户端文件未上传")
     return FileResponse(str(p), filename=p.name,
                         media_type="application/octet-stream")
+
+
+# ---------------- 管理面板：统计（仅密钥持有者可见） ----------------
+
+def _require_admin(request: Request) -> None:
+    key = config.get("admin_key", "")
+    if not key:
+        raise HTTPException(403, "未配置管理密钥（设置页 → 管理面板）")
+    if request.headers.get("x-admin-key", "") != key:
+        raise HTTPException(403, "密钥错误")
+
+
+@app.get("/api/stats/configured")
+def stats_configured():
+    return {"configured": bool(config.get("admin_key", ""))}
+
+
+@app.post("/api/stats/auth")
+async def stats_auth(req: Request):
+    body = await req.json()
+    key = config.get("admin_key", "")
+    if not key:
+        raise HTTPException(403, "未配置管理密钥（设置页 → 管理面板）")
+    if (body.get("key") or "") != key:
+        raise HTTPException(403, "密钥错误")
+    return {"ok": True}
+
+
+@app.get("/api/stats/visits")
+def stats_visits(request: Request, days: int = 30):
+    _require_admin(request)
+    return database.visit_stats(min(max(days, 1), 90))
+
+
+@app.get("/api/stats/downloads")
+def stats_downloads(request: Request, days: int = 30):
+    _require_admin(request)
+    days = min(max(days, 1), 90)
+    by_day = database.query(
+        "SELECT date(downloaded_at) AS d, COUNT(*) AS n, COALESCE(SUM(file_size),0) AS size "
+        "FROM videos WHERE status='done' AND downloaded_at!='' AND downloaded_at > "
+        f"datetime('now','localtime','-{days} days') GROUP BY d ORDER BY d")
+    status_counts = {r["status"]: r["n"] for r in database.query(
+        "SELECT status, COUNT(*) AS n FROM videos GROUP BY status")}
+    done_total = status_counts.get("done", 0)
+    failed_total = status_counts.get("failed", 0)
+    top_authors = [{"k": r["author"], "n": r["n"], "size": r["size"]} for r in database.query(
+        "SELECT author, COUNT(*) AS n, COALESCE(SUM(file_size),0) AS size FROM videos "
+        "WHERE status='done' AND author!='' GROUP BY author ORDER BY n DESC LIMIT 8")]
+    # 标签统计（JSON 列在 Python 侧聚合）
+    from collections import Counter
+    tag_counter: Counter = Counter()
+    for r in database.query("SELECT tags FROM videos WHERE tags NOT IN ('','[]')"):
+        try:
+            for t in json.loads(r["tags"] or "[]"):
+                if str(t).strip():
+                    tag_counter[str(t).strip()] += 1
+        except (ValueError, TypeError):
+            continue
+    top_tags = [{"k": t, "n": n} for t, n in tag_counter.most_common(8)]
+    top_subs = database.query(
+        "SELECT platform, uploader_name, new_count, last_checked FROM subscriptions "
+        "ORDER BY new_count DESC LIMIT 8")
+    tool_usage = database.query(
+        "SELECT kind AS k, COUNT(*) AS n FROM tool_jobs GROUP BY kind ORDER BY n DESC LIMIT 8")
+    recent_failed = database.query(
+        "SELECT id, title, error, created_at FROM videos WHERE status='failed' "
+        "ORDER BY id DESC LIMIT 10")
+    return {
+        "by_day": by_day,
+        "by_platform": database.stats()["by_platform"],
+        "status_counts": status_counts,
+        "success_rate": round(done_total / (done_total + failed_total) * 100, 1)
+        if (done_total + failed_total) else 100.0,
+        "top_authors": top_authors, "top_tags": top_tags,
+        "top_subs": top_subs, "tool_usage": tool_usage,
+        "recent_failed": recent_failed,
+    }
+
+
+# ---------------- 自动后处理规则 ----------------
+
+RULE_MATCH_TYPES = ("all", "platform", "subscription", "tag")
+RULE_ACTION_KINDS = ("mp3", "transcode", "compress", "gif")
+
+
+@app.get("/api/rules")
+def list_rules():
+    return {"items": database.list_rules()}
+
+
+@app.post("/api/rules")
+async def create_rule(req: Request):
+    body = await req.json()
+    match_type = body.get("match_type") or "all"
+    if match_type not in RULE_MATCH_TYPES:
+        raise HTTPException(400, "match_type 仅支持 all/platform/subscription/tag")
+    if match_type != "all" and not (body.get("match_value") or "").strip():
+        raise HTTPException(400, "请填写匹配值")
+    actions = body.get("actions") or []
+    clean = []
+    for a in actions[:6]:
+        if not isinstance(a, dict) or a.get("kind") not in RULE_ACTION_KINDS:
+            continue
+        clean.append({"kind": a["kind"], "params": a.get("params") or {}})
+    if not clean:
+        raise HTTPException(400, "至少选择一个动作（MP3/转码/压缩/GIF）")
+    rid = database.insert_rule({
+        "name": (body.get("name") or "").strip()[:60] or "未命名规则",
+        "match_type": match_type,
+        "match_value": (body.get("match_value") or "").strip()[:120],
+        "actions": json.dumps(clean, ensure_ascii=False),
+        "enabled": 1,
+    })
+    return {"ok": True, "id": rid}
+
+
+@app.patch("/api/rules/{rid}")
+async def patch_rule(rid: int, req: Request):
+    body = await req.json()
+    if not database.get_rule(rid):
+        raise HTTPException(404, "规则不存在")
+    fields = {}
+    if "enabled" in body:
+        fields["enabled"] = 1 if body["enabled"] else 0
+    if "name" in body:
+        fields["name"] = (body.get("name") or "").strip()[:60]
+    if fields:
+        database.update_rule(rid, **fields)
+    return {"ok": True}
+
+
+@app.delete("/api/rules/{rid}")
+def del_rule(rid: int):
+    database.delete_rule(rid)
+    return {"ok": True}
 
 
 # ---------------- 搬运工作台 ----------------

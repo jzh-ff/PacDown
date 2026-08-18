@@ -18,6 +18,7 @@ from . import config, database, postprocess
 
 # 工具清单（kind → 中文名）；前端按此渲染工具卡片
 TOOLS = {
+    "mp3": "提取 MP3",
     "transcode": "转码",
     "compress": "压缩",
     "trim": "剪辑",
@@ -29,7 +30,7 @@ TOOLS = {
     "img_zip": "图集打包 ZIP",
 }
 
-VIDEO_TOOLS = {"transcode", "compress", "trim", "gif", "watermark", "frame"}
+VIDEO_TOOLS = {"mp3", "transcode", "compress", "trim", "gif", "watermark", "frame"}
 IMAGE_TOOLS = {"img_convert", "img_join", "img_zip"}
 
 _IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -163,6 +164,13 @@ def _do_video_tool(kind: str, src: Path, stem: str, params: dict, progress) -> d
         raise RuntimeError("未检测到 ffmpeg。请安装 ffmpeg 并加入 PATH 后重试")
     dur = postprocess.ffprobe_duration(str(src))
     out = out_dir()
+
+    if kind == "mp3":
+        dst = out / f"{stem}.mp3"
+        progress(10)
+        postprocess.extract_mp3(str(src), str(dst))  # 长任务，无细粒度进度
+        progress(100)
+        return {"out": dst}
 
     if kind == "transcode":
         vcodec = {"h264": "libx264", "h265": "libx265",

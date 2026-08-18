@@ -102,6 +102,30 @@ CREATE TABLE IF NOT EXISTS tool_jobs (
     created_at TEXT NOT NULL,
     finished_at TEXT DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS visits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip TEXT DEFAULT '',
+    ua TEXT DEFAULT '',
+    device TEXT DEFAULT '',            -- mobile/pc
+    os TEXT DEFAULT '',                -- windows/android/ios/macos/linux/other
+    browser TEXT DEFAULT '',           -- wechat/qq/chrome/edge/safari/firefox/other
+    referer TEXT DEFAULT '',           -- 来源域名（空=直接访问）
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_visits_time ON visits(created_at);
+CREATE INDEX IF NOT EXISTS idx_visits_ip ON visits(ip);
+
+CREATE TABLE IF NOT EXISTS rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT DEFAULT '',
+    match_type TEXT DEFAULT 'all',     -- all/platform/subscription/tag
+    match_value TEXT DEFAULT '',
+    actions TEXT DEFAULT '[]',         -- JSON: [{kind, params}]
+    enabled INTEGER DEFAULT 1,
+    run_count INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL
+);
 """
 
 _conn: sqlite3.Connection | None = None
@@ -401,6 +425,132 @@ def delete_tool_job(jid: int) -> dict | None:
     if j:
         execute("DELETE FROM tool_jobs WHERE id=?", (jid,))
     return j
+
+
+# ---------------- visits（访问统计） ----------------
+
+BOT_UA = ("bot", "spider", "crawl", "curl", "wget", "python-requests", "okhttp")
+
+
+def parse_ua(ua: str) -> tuple[str, str, str]:
+    """从 UA 解析 (device, os, browser)。"""
+    low = (ua or "").lower()
+    device = "mobile" if any(k in low for k in
+                             ("mobile", "android", "iphone", "ipad", "harmonyos")) else "pc"
+    if "windows" in low:
+        os_name = "windows"
+    elif "android" in low:
+        os_name = "android"
+    elif "iphone" in low or "ipad" in low or "ios" in low:
+        os_name = "ios"
+    elif "mac os" in low or "macintosh" in low:
+        os_name = "macos"
+    elif "linux" in low:
+        os_name = "linux"
+    else:
+        os_name = "other"
+    if "micromessenger" in low:
+        browser = "wechat"
+    elif "qq/" in low or "qqbrowser" in low:
+        browser = "qq"
+    elif "edg" in low:
+        browser = "edge"
+    elif "chrome" in low or "crios" in low:
+        browser = "chrome"
+    elif "safari" in low:
+        browser = "safari"
+    elif "firefox" in low:
+        browser = "firefox"
+    elif "douyin" in low or "aweme" in low:
+        browser = "douyin"
+    else:
+        browser = "other"
+    return device, os_name, browser
+
+
+def insert_visit(ip: str, ua: str, referer: str) -> int | None:
+    """记录一次页面访问；爬虫 UA 与 30 分钟内同 ip+ua 重复的跳过。返回 id 或 None。"""
+    low = (ua or "").lower()
+    if any(b in low for b in BOT_UA):
+        return None
+    recent = query_one(
+        "SELECT id FROM visits WHERE ip=? AND ua=? AND created_at > "
+        "datetime('now','localtime','-30 minutes') LIMIT 1", (ip, ua))
+    if recent:
+        return None
+    device, os_name, browser = parse_ua(ua)
+    cur = execute(
+        "INSERT INTO visits(ip, ua, device, os, browser, referer, created_at) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (ip, ua[:300], device, os_name, browser, referer, now()))
+    return cur.lastrowid
+
+
+def visit_stats(days: int = 30) -> dict:
+    """访问聚合：总览 / 按天 / 24h 时段 / 设备与来源分布 / 最近明细。"""
+    def one(sql, params=()):
+        return query_one(sql, params) or {}
+
+    total = one("SELECT COUNT(*) AS pv, COUNT(DISTINCT ip||ua) AS uv FROM visits")
+    today = one("SELECT COUNT(*) AS pv, COUNT(DISTINCT ip||ua) AS uv FROM visits "
+                "WHERE date(created_at)=date('now','localtime')")
+    yesterday = one("SELECT COUNT(*) AS pv FROM visits "
+                    "WHERE date(created_at)=date('now','localtime','-1 day')")
+    by_day = query(
+        "SELECT date(created_at) AS d, COUNT(*) AS pv, COUNT(DISTINCT ip||ua) AS uv "
+        "FROM visits WHERE created_at > datetime('now','localtime',?) "
+        "GROUP BY d ORDER BY d", (f"-{days} days",))
+    by_hour = query(
+        "SELECT CAST(strftime('%H', created_at) AS INTEGER) AS h, COUNT(*) AS n "
+        "FROM visits WHERE created_at > datetime('now','localtime','-30 days') "
+        "GROUP BY h ORDER BY h")
+    by_device = query(
+        "SELECT device AS k, COUNT(*) AS n FROM visits GROUP BY device ORDER BY n DESC")
+    by_os = query("SELECT os AS k, COUNT(*) AS n FROM visits GROUP BY os ORDER BY n DESC")
+    by_browser = query(
+        "SELECT browser AS k, COUNT(*) AS n FROM visits GROUP BY browser ORDER BY n DESC")
+    by_referer = query(
+        "SELECT CASE WHEN referer='' THEN '直接访问' ELSE referer END AS k, "
+        "COUNT(*) AS n FROM visits GROUP BY k ORDER BY n DESC LIMIT 10")
+    recent = query(
+        "SELECT ip, ua, device, os, browser, referer, created_at FROM visits "
+        "ORDER BY id DESC LIMIT 100")
+    return {
+        "total_pv": total.get("pv", 0), "total_uv": total.get("uv", 0),
+        "today_pv": today.get("pv", 0), "today_uv": today.get("uv", 0),
+        "yesterday_pv": yesterday.get("pv", 0),
+        "by_day": by_day, "by_hour": by_hour,
+        "by_device": by_device, "by_os": by_os, "by_browser": by_browser,
+        "by_referer": by_referer, "recent": recent,
+    }
+
+
+# ---------------- rules（自动后处理规则） ----------------
+
+def insert_rule(r: dict) -> int:
+    r = {**r, "created_at": now()}
+    cols = ",".join(r.keys())
+    marks = ",".join(["?"] * len(r))
+    cur = execute(f"INSERT INTO rules({cols}) VALUES({marks})", tuple(r.values()))
+    return cur.lastrowid
+
+
+def list_rules() -> list[dict]:
+    return query("SELECT * FROM rules ORDER BY id DESC")
+
+
+def get_rule(rid: int) -> dict | None:
+    return query_one("SELECT * FROM rules WHERE id=?", (rid,))
+
+
+def update_rule(rid: int, **fields) -> None:
+    if fields:
+        sets = ",".join(f"{k}=?" for k in fields)
+        execute(f"UPDATE rules SET {sets} WHERE id=?", (*fields.values(), rid))
+
+
+def delete_rule(rid: int) -> None:
+    execute("DELETE FROM rules WHERE id=?", (rid,))
 
 
 # ---------------- reposts（搬运文案） ----------------

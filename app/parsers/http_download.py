@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 
 import httpx
@@ -44,11 +45,12 @@ def safe_filename(name: str, max_len: int = 80) -> str:
 
 def stream_download(url: str, dest: Path, platform: str, progress=None,
                     referer: str = "", mobile: bool = False,
-                    resume: bool = False, extra_headers: dict | None = None) -> dict:
+                    resume: bool = False, extra_headers: dict | None = None,
+                    rate_limit: int = 0) -> dict:
     """流式下载 url 到 dest，返回 {file_path, file_size}。
 
     resume=True 时启用断点续传：先写 dest.part（已存在则 Range 追加），
-    完成后改名为 dest。
+    完成后改名为 dest。rate_limit 为单任务字节/秒限额（0 不限）。
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     headers = dict(extra_headers or {})
@@ -64,6 +66,10 @@ def stream_download(url: str, dest: Path, platform: str, progress=None,
             if done:
                 headers["Range"] = f"bytes={done}-"
 
+    # 限速窗口状态：每窗口最多 rate_limit 字节，超出则等待补齐
+    win_t = time.monotonic()
+    win_bytes = 0
+
     with client(platform, mobile=mobile) as c:
         with c.stream("GET", url, headers=headers) as resp:
             if done and resp.status_code == 200:
@@ -77,6 +83,14 @@ def stream_download(url: str, dest: Path, platform: str, progress=None,
                 for chunk in resp.iter_bytes(chunk_size=1 << 18):
                     f.write(chunk)
                     done += len(chunk)
+                    if rate_limit:
+                        win_bytes += len(chunk)
+                        if win_bytes >= rate_limit:
+                            elapsed = time.monotonic() - win_t
+                            if elapsed < 1:
+                                time.sleep(1 - elapsed)
+                            win_t = time.monotonic()
+                            win_bytes = 0
                     if progress and total:
                         try:
                             progress(min(done / total * 100, 100),

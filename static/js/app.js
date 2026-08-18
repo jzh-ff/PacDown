@@ -93,6 +93,7 @@ $("#nav").addEventListener("click", (e) => {
   if (btn.dataset.page === "settings") loadSettings();
   if (btn.dataset.page === "repost") loadRepost();
   if (btn.dataset.page === "tools") loadToolbox();
+  if (btn.dataset.page === "stats") loadStatsPage();
 });
 
 /* ---------- 下载页 ---------- */
@@ -1054,7 +1055,8 @@ function closeLightbox() {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (!$("#lightbox").hidden) closeLightbox();
-    else closeModal();
+    else if (!$("#modal").hidden) closeModal();
+    else if (!$("#donate-modal").hidden) closeDonate();
   }
   if (!$("#lightbox").hidden) {
     if (e.key === "ArrowLeft") lbMove(-1);
@@ -1661,6 +1663,305 @@ $("#notif-read-all").addEventListener("click", async () => {
   pollNotifications();
 });
 
+/* ---------- 管理统计面板（仅站长） ---------- */
+
+let adminKey = localStorage.getItem("pacdown-admin-key") || "";
+let statsUnlocked = false;
+
+async function initStatsNav() {
+  try {
+    const s = await api("/api/stats/configured");
+    $("#nav-stats").hidden = !s.configured;
+    if (s.configured && adminKey) {
+      const r = await fetch("/api/stats/auth", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: adminKey }),
+      });
+      statsUnlocked = r.ok;
+    }
+  } catch (e) { /* 忽略 */ }
+}
+
+async function loadStatsPage() {
+  if (statsUnlocked) {
+    $("#stats-unlock").hidden = true;
+    $("#stats-dashboard").hidden = false;
+    loadAdminStats();
+    return;
+  }
+  $("#stats-unlock").hidden = false;
+  $("#stats-dashboard").hidden = true;
+  $("#stats-key-input").focus();
+}
+
+$("#btn-stats-unlock").addEventListener("click", unlockStats);
+$("#stats-key-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") unlockStats();
+});
+
+async function unlockStats() {
+  const key = $("#stats-key-input").value.trim();
+  if (!key) { toast("请输入管理密钥", "warn"); return; }
+  try {
+    await api("/api/stats/auth", { method: "POST", body: { key } });
+    adminKey = key;
+    localStorage.setItem("pacdown-admin-key", key);
+    statsUnlocked = true;
+    toast("统计面板已解锁");
+    loadStatsPage();
+  } catch (e) {
+    toast(e.message, "err");
+  }
+}
+
+async function adminFetch(path) {
+  const r = await fetch(path, { headers: { "X-Admin-Key": adminKey } });
+  if (r.status === 403) {
+    adminKey = ""; statsUnlocked = false;
+    localStorage.removeItem("pacdown-admin-key");
+    loadStatsPage();
+    throw new Error("密钥已失效，请重新输入");
+  }
+  if (!r.ok) throw new Error(`请求失败 (${r.status})`);
+  return r.json();
+}
+
+async function loadAdminStats() {
+  try {
+    const [visits, dls] = await Promise.all([
+      adminFetch("/api/stats/visits"),
+      adminFetch("/api/stats/downloads"),
+    ]);
+    renderAdminStats(visits, dls);
+  } catch (e) { toast(e.message, "err"); }
+}
+
+const DEVICE_NAME = { mobile: "手机", pc: "电脑" };
+const OS_NAME = { windows: "Windows", android: "安卓", ios: "iOS", macos: "macOS", linux: "Linux", other: "其他" };
+const BROWSER_NAME = { wechat: "微信内置", qq: "QQ", chrome: "Chrome", edge: "Edge", safari: "Safari", firefox: "Firefox", douyin: "抖音内嵌", other: "其他" };
+const KIND_CN = { mp3: "提取MP3", transcode: "转码", compress: "压缩", trim: "剪辑", gif: "GIF", watermark: "水印", frame: "截帧", img_convert: "图片转换", img_join: "拼接长图", img_zip: "图集打包" };
+
+function maskIp(ip) {
+  if (!ip) return "";
+  if (ip.includes(":")) return ip.split(":").slice(0, 3).join(":") + ":*";
+  const p = ip.split(".");
+  return p.length === 4 ? `${p[0]}.${p[1]}.*.*` : ip;
+}
+
+function renderAdminStats(v, d) {
+  // 总览卡片
+  const pvPerUv = v.total_uv ? (v.total_pv / v.total_uv).toFixed(1) : "0";
+  const cards = [
+    ["累计访问", v.total_pv, `${v.total_uv} 位访客 · 人均 ${pvPerUv} 次`],
+    ["今日访问", v.today_pv, `${v.today_uv} 位访客 · 昨日 ${v.yesterday_pv}`],
+    ["累计下载", d.status_counts.done || 0, `成功率 ${d.success_rate}%`],
+    ["失败任务", d.status_counts.failed || 0, "详情见下方列表"],
+  ];
+  $("#admin-cards").innerHTML = cards.map(([label, val, sub], i) => `
+    <div class="stat-card glass"><div class="stat-label">${label}</div>
+      <div class="stat-value num">${val}</div><div class="stat-sub">${esc(sub)}</div></div>`).join("");
+
+  // 图表
+  $("#visit-trend-total").textContent = `累计 ${v.total_pv} 次`;
+  $("#chart-visits").innerHTML = areaChart(v.by_day.map((x) => ({ k: x.d, n: x.pv })), "#7c6cf5");
+  $("#chart-hours").innerHTML = barChart(v.by_hour, "#3fd0e0");
+  renderDist("#chart-devices", [
+    ...v.by_device.map((x) => [DEVICE_NAME[x.k] || x.k, x.n, "#7c6cf5"]),
+    ...v.by_os.slice(0, 4).map((x) => [OS_NAME[x.k] || x.k, x.n, "#3b82f6"]),
+    ...v.by_browser.slice(0, 4).map((x) => [BROWSER_NAME[x.k] || x.k, x.n, "#3fd0e0"]),
+  ]);
+  renderDist("#chart-referers", v.by_referer.map((x) => [x.k, x.n, "#f0b945"]));
+
+  const dlDays = d.by_day.map((x) => ({ k: x.d, n: x.n }));
+  $("#dl-trend-total").textContent = `近30天 ${dlDays.reduce((s, x) => s + x.n, 0)} 个`;
+  $("#chart-downloads").innerHTML = areaChart(dlDays, "#3ecf8e");
+  const PLAT_COLOR = { bilibili: "#fb7299", douyin: "#fe4d6f", kuaishou: "#ff9b3d", xiaohongshu: "#ff5170", direct: "#38bdf8", generic: "#8a95f8" };
+  $("#chart-platform").innerHTML = donut(d.by_platform.map((x) => ({
+    k: PLATFORM_NAME[x.platform] || x.platform, n: x.n, color: PLAT_COLOR[x.platform] || "#8a95f8",
+  })));
+  renderDist("#chart-authors", d.top_authors.map((x) => [x.k, x.n, "#7c6cf5"]));
+  renderDist("#chart-tags", d.top_tags.map((x) => ["#" + x.k, x.n, "#f0b945"]));
+  renderDist("#chart-subs", d.top_subs.map((x) => [`${x.uploader_name}（${PLATFORM_NAME[x.platform] || x.platform}）`, x.new_count, "#3ecf8e"]));
+  renderDist("#chart-tools", d.tool_usage.map((x) => [KIND_CN[x.k] || x.k, x.n, "#3fd0e0"]));
+
+  // 明细表
+  $("#visit-recent-count").textContent = `最近 ${v.recent.length} 条`;
+  $("#table-visits").innerHTML = `<thead><tr><th>时间</th><th>IP</th><th>设备</th><th>来源</th><th>浏览器</th></tr></thead><tbody>` +
+    v.recent.map((r) => `<tr>
+      <td class="num">${esc(r.created_at)}</td>
+      <td class="num">${esc(maskIp(r.ip))}</td>
+      <td>${DEVICE_NAME[r.device] || r.device} · ${OS_NAME[r.os] || r.os}</td>
+      <td>${esc(r.referer || "直接访问")}</td>
+      <td>${BROWSER_NAME[r.browser] || r.browser}</td>
+    </tr>`).join("") + `</tbody>`;
+  $("#table-failed").innerHTML = d.recent_failed.length
+    ? `<thead><tr><th>时间</th><th>标题</th><th>错误</th></tr></thead><tbody>` +
+      d.recent_failed.map((r) => `<tr>
+        <td class="num">${esc(r.created_at)}</td>
+        <td>${esc((r.title || "").slice(0, 30))}</td>
+        <td class="err-cell" title="${esc(r.error || "")}">${esc((r.error || "").slice(0, 60))}</td>
+      </tr>`).join("") + `</tbody>`
+    : `<tbody><tr><td style="text-align:center;color:var(--text-3);padding:18px">暂无失败任务 🎉</td></tr></tbody>`;
+}
+
+/* 纯 SVG 图表（无依赖） */
+function areaChart(data, color) {
+  if (!data.length) return `<div class="chart-empty">暂无数据</div>`;
+  const W = 640, H = 160, PAD = 8, PAD_B = 18;
+  const days = 30;
+  const daysMap = new Map(data.map((x) => [x.k, x.n]));
+  const keys = [];
+  const now = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(now - i * 86400000);
+    keys.push(d.toISOString().slice(0, 10));
+  }
+  const series = keys.map((k) => daysMap.get(k) || 0);
+  const max = Math.max(...series, 1);
+  const x = (i) => PAD + (i / (days - 1)) * (W - PAD * 2);
+  const y = (n) => H - PAD_B - (n / max) * (H - PAD - PAD_B);
+  const pts = series.map((n, i) => `${x(i).toFixed(1)},${y(n).toFixed(1)}`);
+  const line = `M${pts.join("L")}`;
+  const area = `${line}L${x(days - 1).toFixed(1)},${H - PAD_B}L${PAD},${H - PAD_B}Z`;
+  const labels = [0, Math.floor(days / 2), days - 1].map((i) =>
+    `<text x="${x(i)}" y="${H - 4}" text-anchor="${i === 0 ? "start" : i === days - 1 ? "end" : "middle"}" class="axis">${keys[i].slice(5)}</text>`).join("");
+  const peak = series.indexOf(Math.max(...series));
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="chart">
+    <path d="${area}" fill="${color}" opacity="0.15"/>
+    <path d="${line}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round"/>
+    <circle cx="${x(peak)}" cy="${y(series[peak])}" r="3" fill="${color}"/>
+    <text x="${x(peak)}" y="${y(series[peak]) - 6}" text-anchor="middle" class="axis">${series[peak]}</text>
+    ${labels}</svg>`;
+}
+
+function barChart(data, color) {
+  const counts = Array.from({ length: 24 }, (_, h) => ({ h, n: 0 }));
+  data.forEach((x) => { if (counts[x.h]) counts[x.h].n = x.n; });
+  const max = Math.max(...counts.map((c) => c.n), 1);
+  return `<div class="hours-grid">` + counts.map((c) => `
+    <div class="hour-col" title="${c.h}:00 · ${c.n} 次">
+      <div class="hour-bar" style="height:${Math.max(4, c.n / max * 100)}%;background:${c.n ? color : "var(--surface-2)"}"></div>
+      <span class="hour-label num">${c.h}</span>
+    </div>`).join("") + `</div>`;
+}
+
+function donut(items) {
+  const total = items.reduce((s, x) => s + x.n, 0);
+  if (!total) return `<div class="chart-empty">暂无数据</div>`;
+  const R = 15.915;
+  let acc = 0;
+  const segs = items.map((x) => {
+    const pct = x.n / total * 100;
+    const seg = `<circle r="${R}" cx="21" cy="21" fill="transparent" stroke="${x.color}"
+      stroke-width="5.5" stroke-dasharray="${pct.toFixed(2)} ${(100 - pct).toFixed(2)}"
+      stroke-dashoffset="${(25 - acc).toFixed(2)}"/>`;
+    acc += pct;
+    return seg;
+  }).join("");
+  const legend = items.slice(0, 6).map((x) => `
+    <div class="legend-row"><i style="background:${x.color}"></i>
+      <span>${esc(x.k)}</span><b class="num">${x.n}</b>
+      <span class="num pct">${(x.n / total * 100).toFixed(0)}%</span></div>`).join("");
+  return `<div class="donut-flex">
+    <svg viewBox="0 0 42 42" class="donut-svg">${segs}
+      <text x="21" y="20" text-anchor="middle" class="donut-num">${total}</text>
+      <text x="21" y="26" text-anchor="middle" class="donut-sub">总计</text></svg>
+    <div class="legend">${legend}</div></div>`;
+}
+
+function renderDist(sel, rows) {
+  const total = rows.reduce((s, [, n]) => s + n, 0) || 1;
+  $(sel).innerHTML = rows.length ? rows.map(([k, n, color]) => `
+    <div class="dist-row">
+      <span class="dist-k">${esc(String(k))}</span>
+      <div class="dist-bar"><i style="width:${(n / total * 100).toFixed(1)}%;background:${color}"></i></div>
+      <b class="num">${n}</b>
+    </div>`).join("") : `<div class="chart-empty">暂无数据</div>`;
+}
+
+/* ---------- 自动规则 ---------- */
+
+const MATCH_DESC = {
+  all: () => "全部下载",
+  platform: (v) => `平台 = ${PLATFORM_NAME[v] || v}`,
+  subscription: (v) => `订阅 #${v}`,
+  tag: (v) => `标签包含 #${v}`,
+};
+const ACTION_DESC = { mp3: "提取MP3", transcode: "转码H.264", compress: "压缩", gif: "生成GIF" };
+
+async function loadRules() {
+  const box = $("#rule-list");
+  try {
+    const { items } = await api("/api/rules");
+    if (!items.length) {
+      box.innerHTML = `<p class="hint">还没有规则：如「抖音下载完自动提取 MP3」「某订阅的视频自动压缩」</p>`;
+      return;
+    }
+    box.innerHTML = items.map((r) => {
+      let actions = [];
+      try { actions = JSON.parse(r.actions || "[]"); } catch (e) { /* 忽略 */ }
+      return `<div class="rule-card glass ${r.enabled ? "" : "off"}">
+        <div class="rule-info">
+          <div class="rule-name">${esc(r.name)}</div>
+          <div class="rule-meta">
+            <span class="h-tag">${esc((MATCH_DESC[r.match_type] || ((v) => v))(r.match_value))}</span>
+            ${actions.map((a) => `<span class="h-tag act">${ACTION_DESC[a.kind] || a.kind}</span>`).join("")}
+            <span class="num">已触发 ${r.run_count} 次</span>
+          </div>
+        </div>
+        <div class="rule-ops">
+          <button class="btn btn-ghost btn-sm" onclick="toggleRule(${r.id}, ${r.enabled ? 0 : 1})">${r.enabled ? "停用" : "启用"}</button>
+          <button class="btn btn-danger btn-sm" onclick="removeRule(${r.id})">删除</button>
+        </div>
+      </div>`;
+    }).join("");
+  } catch (e) {
+    box.innerHTML = `<p class="hint">${esc(e.message)}</p>`;
+  }
+}
+
+$("#rule-match-type").addEventListener("change", (e) => {
+  $("#rule-match-value").hidden = e.target.value === "all";
+});
+
+$("#btn-add-rule").addEventListener("click", async () => {
+  const actions = $$(".rule-act:checked").map((el) => ({ kind: el.value, params: {} }));
+  const body = {
+    name: $("#rule-name").value.trim(),
+    match_type: $("#rule-match-type").value,
+    match_value: $("#rule-match-value").value.trim(),
+    actions,
+  };
+  try {
+    await api("/api/rules", { method: "POST", body });
+    toast("规则已添加，下次下载完成时生效");
+    $("#rule-name").value = "";
+    $$(".rule-act:checked").forEach((el) => { el.checked = false; });
+    loadRules();
+  } catch (e) { toast(e.message, "err"); }
+});
+
+window.toggleRule = async (id, enabled) => {
+  try {
+    await api(`/api/rules/${id}`, { method: "PATCH", body: { enabled: !!enabled } });
+    loadRules();
+  } catch (e) { toast(e.message, "err"); }
+};
+
+window.removeRule = async (id) => {
+  if (!confirm("删除该规则？")) return;
+  try { await api(`/api/rules/${id}`, { method: "DELETE" }); loadRules(); }
+  catch (e) { toast(e.message, "err"); }
+};
+
+/* ---------- 赞赏 ---------- */
+
+window.closeDonate = () => { $("#donate-modal").hidden = true; };
+$("#donate-btn").addEventListener("click", () => { $("#donate-modal").hidden = false; });
+$("#donate-modal").addEventListener("click", (e) => {
+  if (e.target.id === "donate-modal") closeDonate();
+});
+
 /* ---------- 设置页 ---------- */
 
 const COOKIE_FIELDS = [
@@ -1669,16 +1970,19 @@ const COOKIE_FIELDS = [
   ["set-ks-cookie", "kuaishou_cookie"],
   ["set-xhs-cookie", "xiaohongshu_cookie"],
   ["set-ai-key", "ai_api_key"],
+  ["set-admin-key", "admin_key"],
 ];
 
 async function loadSettings() {
   try {
     const cfg = await api("/api/config");
+    loadRules();
     $("#set-download-dir").value = cfg.download_dir || "";
     $("#set-concurrency").value = cfg.max_concurrency;
     $("#set-quality").value = cfg.default_quality;
     $("#set-name-template").value = cfg.name_template || "{date}_{title}";
     $("#set-sub-interval").value = cfg.subscription_interval;
+    $("#set-speed-limit").value = cfg.speed_limit_mb || 0;
     $("#set-clean-enabled").checked = !!cfg.auto_clean_enabled;
     $("#set-clean-days").value = cfg.auto_clean_days || 30;
     $("#set-clean-fav").checked = cfg.auto_clean_keep_favorite !== false;
@@ -1701,6 +2005,7 @@ $("#btn-save-settings").addEventListener("click", async () => {
     default_quality: $("#set-quality").value.trim() || "best",
     name_template: $("#set-name-template").value.trim() || "{date}_{title}",
     subscription_interval: +$("#set-sub-interval").value || 30,
+    speed_limit_mb: +$("#set-speed-limit").value || 0,
     auto_clean_enabled: $("#set-clean-enabled").checked,
     auto_clean_days: +$("#set-clean-days").value || 30,
     auto_clean_keep_favorite: $("#set-clean-fav").checked,
@@ -1727,6 +2032,7 @@ $("#btn-save-settings").addEventListener("click", async () => {
 async function boot() {
   loadDirs();
   updateViewBtn();
+  initStatsNav();
   // 服务器托管了 Windows 客户端时显示下载入口
   api("/api/app/status").then((s) => {
     if (s.available) {
@@ -1735,6 +2041,11 @@ async function boot() {
       a.title += `（v${s.updated_at ? s.updated_at.slice(0, 10) : ""} · ${fmtSize(s.size)}）`;
     }
   }).catch(() => { /* 忽略 */ });
+  // PWA：HTTPS 或 localhost 下注册 Service Worker（挂根路径获得全站作用域）
+  if ("serviceWorker" in navigator &&
+      (location.protocol === "https:" || ["localhost", "127.0.0.1"].includes(location.hostname))) {
+    navigator.serviceWorker.register("/sw.js").catch(() => { /* 忽略 */ });
+  }
   pollTasks();
   pollNotifications(true);
   setInterval(() => {
