@@ -18,6 +18,27 @@ from .parsers import dispatch, ParseError
 from .parsers.http_download import REFERERS, safe_filename
 
 
+def remove_video_files(v: dict) -> list[str]:
+    """删除记录关联的磁盘文件（视频/封面/音频/弹幕/图集/sidecar），返回删除的文件名列表。"""
+    removed = []
+    for key in ("file_path", "cover_path", "audio_path", "danmaku_path"):
+        p = v.get(key) or ""
+        if p and Path(p).exists():
+            Path(p).unlink()
+            removed.append(Path(p).name)
+    for img in json.loads(v.get("images") or "[]"):
+        if Path(img).exists():
+            Path(img).unlink()
+            removed.append(Path(img).name)
+    fp = v.get("file_path") or ""
+    if fp:
+        sidecar = Path(fp).with_suffix(".json")
+        if sidecar.exists():
+            sidecar.unlink()
+            removed.append(sidecar.name)
+    return removed
+
+
 def render_name(template: str, task: dict) -> str:
     """按命名模板渲染文件名主体。变量：{date} {title} {author} {platform} {id}。"""
     date = (task["publish_time"] or "")[:10].replace("-", "") \

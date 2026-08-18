@@ -4,9 +4,12 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
+import zipfile
 from pathlib import Path
 from urllib.parse import quote
 
@@ -15,14 +18,15 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 from . import config, database, postprocess, scheduler, toolbox
-from .downloader import manager
+from .downloader import manager, remove_video_files
 from .parsers import PLATFORM_META, extract_urls
 from .parsers import bilibili as bili_parser
 from .parsers import douyin as dy_parser
 from .parsers.base import ParseError
-from .parsers.http_download import REFERERS
+from .parsers.http_download import REFERERS, safe_filename
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -305,34 +309,12 @@ async def patch_history(vid: int, req: Request):
     return {"ok": True, **fields}
 
 
-def _remove_video_files(v: dict) -> list[str]:
-    """删除记录关联的磁盘文件，返回删除的文件名列表。"""
-    removed = []
-    for key in ("file_path", "cover_path", "audio_path", "danmaku_path"):
-        p = v.get(key) or ""
-        if p and Path(p).exists():
-            Path(p).unlink()
-            removed.append(Path(p).name)
-    for img in json.loads(v.get("images") or "[]"):
-        if Path(img).exists():
-            Path(img).unlink()
-            removed.append(Path(img).name)
-    # sidecar JSON
-    fp = v.get("file_path") or ""
-    if fp:
-        sidecar = Path(fp).with_suffix(".json")
-        if sidecar.exists():
-            sidecar.unlink()
-            removed.append(sidecar.name)
-    return removed
-
-
 @app.delete("/api/history/{vid}")
 def delete_history(vid: int, keep_files: bool = True):
     v = database.delete_video(vid)
     if not v:
         raise HTTPException(404, "记录不存在")
-    removed = [] if keep_files else _remove_video_files(v)
+    removed = [] if keep_files else remove_video_files(v)
     return {"ok": True, "files_removed": removed}
 
 
@@ -350,7 +332,7 @@ async def batch_delete(req: Request):
             continue
         deleted += 1
         if not keep_files:
-            files_removed += _remove_video_files(v)
+            files_removed += remove_video_files(v)
     return {"ok": True, "deleted": deleted,
             "files_removed": len(files_removed)}
 
@@ -370,6 +352,51 @@ def open_folder(vid: int):
     else:
         subprocess.Popen(["xdg-open", str(p.parent)])
     return {"ok": True}
+
+
+def _silent_unlink(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+@app.get("/api/history/{vid}/zip")
+def history_zip(vid: int):
+    """把该记录的全部产物（视频/图集/封面/音频/弹幕/sidecar）打成 ZIP 供浏览器保存到本机。"""
+    v = database.get_video(vid)
+    if not v:
+        raise HTTPException(404, "记录不存在")
+    if v["status"] != "done":
+        raise HTTPException(400, "任务尚未完成")
+    candidates: list[str] = []
+    for key in ("file_path", "cover_path", "audio_path", "danmaku_path"):
+        candidates.append(v.get(key) or "")
+    candidates += json.loads(v.get("images") or "[]")
+    if v.get("file_path"):
+        sidecar = Path(v["file_path"]).with_suffix(".json")
+        candidates.append(str(sidecar))
+    files, seen = [], set()
+    for c in candidates:
+        if c and c not in seen and Path(c).exists():
+            seen.add(c)
+            files.append(Path(c))
+    if not files:
+        raise HTTPException(404, "文件已被移动或删除")
+    tmp_dir = database.DB_PATH.parent / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(suffix=".zip", dir=str(tmp_dir))
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as zf:  # 媒体已压缩，用 STORED 省CPU
+            for f in files:
+                zf.write(f, f.name)
+    except Exception:
+        _silent_unlink(tmp)
+        raise HTTPException(500, "打包失败")
+    name = safe_filename(v.get("title") or f"pacdown_{vid}", 60)
+    return FileResponse(tmp, filename=f"{name}.zip", media_type="application/zip",
+                        background=BackgroundTask(_silent_unlink, tmp))
 
 
 def _row_public(r: dict, full: bool = False) -> dict:
@@ -406,8 +433,12 @@ MIME = {".mp4": "video/mp4", ".mkv": "video/x-matroska", ".webm": "video/webm",
 
 
 @app.get("/api/file")
-def serve_file(request: Request, id: int, type: str = "video", index: int = 0):
-    """按记录 ID 输出已下载文件。路径取自数据库而非用户输入，杜绝目录遍历。"""
+def serve_file(request: Request, id: int, type: str = "video", index: int = 0,
+               download: int = 0):
+    """按记录 ID 输出已下载文件。路径取自数据库而非用户输入，杜绝目录遍历。
+
+    download=1 时带 Content-Disposition 附件头，浏览器直接保存到本机。
+    """
     v = database.get_video(id)
     if not v:
         raise HTTPException(404, "记录不存在")
@@ -430,6 +461,10 @@ def serve_file(request: Request, id: int, type: str = "video", index: int = 0):
     media_type = MIME.get(path.suffix.lower(), "application/octet-stream")
     size = path.stat().st_size
     range_header = request.headers.get("range")
+    extra = {"Accept-Ranges": "bytes",
+             "Cache-Control": "private, max-age=3600"}
+    if download:
+        extra["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(path.name)}"
 
     if range_header and range_header.startswith("bytes="):
         try:
@@ -445,8 +480,7 @@ def serve_file(request: Request, id: int, type: str = "video", index: int = 0):
                 chunk = f.read(end - start + 1)
             return Response(content=chunk, status_code=206, media_type=media_type,
                             headers={"Content-Range": f"bytes {start}-{end}/{size}",
-                                     "Accept-Ranges": "bytes",
-                                     "Cache-Control": "private, max-age=3600"})
+                                     **extra})
         except ValueError:
             pass
 
@@ -459,9 +493,7 @@ def serve_file(request: Request, id: int, type: str = "video", index: int = 0):
                 yield chunk
 
     return StreamingResponse(iter_file(), media_type=media_type,
-                             headers={"Accept-Ranges": "bytes",
-                                      "Content-Length": str(size),
-                                      "Cache-Control": "private, max-age=3600"})
+                             headers={**extra, "Content-Length": str(size)})
 
 
 # ---------------- 封面代理（绕防盗链） ----------------

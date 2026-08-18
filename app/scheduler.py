@@ -4,12 +4,14 @@ from __future__ import annotations
 import json
 import re
 import threading
+from datetime import datetime, timedelta
+from pathlib import Path
 
 import httpx
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from . import config, database
-from .downloader import manager
+from .downloader import manager, remove_video_files
 from .parsers.http_download import client as http_client
 
 SUPPORTED = {"bilibili", "douyin", "xiaohongshu", "kuaishou"}
@@ -382,6 +384,102 @@ def check_subscription(sub: dict) -> int:
     return new_count
 
 
+# ---------------- 自动清理 ----------------
+
+def auto_clean_once() -> dict:
+    """按配置清理超过保留天数的已完成内容（视频/工具产物/上传素材）。
+
+    默认关闭；开启后每天执行一次，收藏内容默认保留。返回清理统计。
+    """
+    if not config.get("auto_clean_enabled", False):
+        return {"skipped": True}
+    days = max(1, int(config.get("auto_clean_days", 30) or 30))
+    keep_fav = bool(config.get("auto_clean_keep_favorite", True))
+    cutoff_dt = datetime.now() - timedelta(days=days)
+    cutoff = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    where = "status='done' AND downloaded_at!='' AND downloaded_at<?"
+    params: list = [cutoff]
+    if keep_fav:
+        where += " AND COALESCE(favorite,0)=0"
+    rows = database.query(f"SELECT * FROM videos WHERE {where}", tuple(params))
+
+    freed = 0
+    for v in rows:
+        try:
+            remove_video_files(v)
+            freed += v.get("file_size") or 0
+            database.delete_video(v["id"])
+        except Exception:
+            continue  # 单条失败不影响整批
+    _remove_empty_dirs(rows)
+    tools_cleaned = _clean_tool_outputs(cutoff)
+    uploads_cleaned = _clean_uploads(cutoff_dt)
+
+    result = {"videos": len(rows), "freed_bytes": freed,
+              "tool_outputs": tools_cleaned, "uploads": uploads_cleaned}
+    if rows or tools_cleaned or uploads_cleaned:
+        database.insert_notification(
+            "system",
+            f"自动清理：{len(rows)} 个视频、{tools_cleaned} 个工具产物、{uploads_cleaned} 个上传文件",
+            f"已删除超过 {days} 天的完成内容，释放约 {freed / 1024 / 1024:.0f} MB 磁盘空间")
+    return result
+
+
+def _remove_empty_dirs(videos: list[dict]) -> None:
+    """清理视频删除后残留的空目录（平台/作者层级），尽力而为。"""
+    root = Path(config.get("download_dir")).resolve()
+    dirs: set[Path] = set()
+    for v in videos:
+        fp = v.get("file_path") or v.get("cover_path") or ""
+        if not fp:
+            continue
+        p = Path(fp).resolve().parent
+        while p != root and root in p.parents:
+            dirs.add(p)
+            p = p.parent
+    for d in sorted(dirs, key=lambda x: -len(x.parts)):
+        try:
+            if d.exists() and not any(d.iterdir()):
+                d.rmdir()
+        except OSError:
+            pass
+
+
+def _clean_tool_outputs(cutoff: str) -> int:
+    rows = database.query(
+        "SELECT * FROM tool_jobs WHERE status='done' AND finished_at!='' AND finished_at<?",
+        (cutoff,))
+    n = 0
+    for j in rows:
+        try:
+            for p in json.loads(j.get("extra") or "[]") or [j.get("out_path") or ""]:
+                if p and Path(p).exists():
+                    Path(p).unlink()
+            database.delete_tool_job(j["id"])
+            n += 1
+        except Exception:
+            continue
+    return n
+
+
+def _clean_uploads(cutoff_dt: datetime) -> int:
+    from .toolbox import uploads_dir
+    ts = cutoff_dt.timestamp()
+    n = 0
+    try:
+        for f in uploads_dir().iterdir():
+            if f.is_file() and f.stat().st_mtime < ts:
+                try:
+                    f.unlink()
+                    n += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return n
+
+
 class SubscriptionScheduler:
     def __init__(self):
         self._sched: BackgroundScheduler | None = None
@@ -395,6 +493,10 @@ class SubscriptionScheduler:
             self._sched = BackgroundScheduler(daemon=True)
             self._sched.add_job(self.check_all, "interval", minutes=minutes,
                                 id="subs_check", max_instances=1, coalesce=True)
+            # 自动清理：每 24h 一次；启动 5 分钟后先跑一遍（重启/发版即触发）
+            self._sched.add_job(auto_clean_once, "interval", hours=24,
+                                id="auto_clean", max_instances=1, coalesce=True,
+                                next_run_time=datetime.now() + timedelta(minutes=5))
             self._sched.start()
 
     def check_all(self):

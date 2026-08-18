@@ -931,7 +931,9 @@ window.openDetail = async (id) => {
       ${commentsBlock}
       ${v.error ? `<div class="task-err" style="margin-top:10px">${esc(v.error)}</div>` : ""}
       <div class="modal-actions">
-        ${v.file_path && v.status === "done" ? `<button class="btn btn-primary btn-sm" onclick="openFolder(${v.id})">打开所在目录</button>` : ""}
+        ${v.status === "done" && v.file_path && !images.length ? `<button class="btn btn-primary btn-sm" onclick="saveToLocal(${v.id}, 'file')">保存视频到本机</button>` : ""}
+        ${v.status === "done" ? `<button class="btn btn-primary btn-sm" onclick="saveToLocal(${v.id}, 'zip')">打包下载 ZIP</button>` : ""}
+        ${v.file_path && v.status === "done" ? `<button class="btn btn-ghost btn-sm" onclick="openFolder(${v.id})">打开所在目录</button>` : ""}
         <button class="btn btn-ghost btn-sm" onclick="redownload(${v.id}, '${esc(v.source_url)}')">重新下载</button>
         <button class="btn btn-danger btn-sm" onclick="deleteVideo(${v.id})">删除记录</button>
       </div>
@@ -1059,6 +1061,13 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "ArrowRight") lbMove(1);
   }
 });
+
+window.saveToLocal = (id, kind) => {
+  // 域名/远程访问时把文件拉回本机：file=单个视频，zip=全部产物打包
+  window.location.href = kind === "zip"
+    ? `/api/history/${id}/zip`
+    : `/api/file?id=${id}&type=video&download=1`;
+};
 
 window.openFolder = async (id) => {
   try { await api(`/api/history/${id}/open`, { method: "POST" }); }
@@ -1670,6 +1679,9 @@ async function loadSettings() {
     $("#set-quality").value = cfg.default_quality;
     $("#set-name-template").value = cfg.name_template || "{date}_{title}";
     $("#set-sub-interval").value = cfg.subscription_interval;
+    $("#set-clean-enabled").checked = !!cfg.auto_clean_enabled;
+    $("#set-clean-days").value = cfg.auto_clean_days || 30;
+    $("#set-clean-fav").checked = cfg.auto_clean_keep_favorite !== false;
     $("#set-proxy").value = cfg.http_proxy || "";
     $("#set-ai-url").value = cfg.ai_base_url || "";
     $("#set-ai-model").value = cfg.ai_model || "";
@@ -1689,6 +1701,9 @@ $("#btn-save-settings").addEventListener("click", async () => {
     default_quality: $("#set-quality").value.trim() || "best",
     name_template: $("#set-name-template").value.trim() || "{date}_{title}",
     subscription_interval: +$("#set-sub-interval").value || 30,
+    auto_clean_enabled: $("#set-clean-enabled").checked,
+    auto_clean_days: +$("#set-clean-days").value || 30,
+    auto_clean_keep_favorite: $("#set-clean-fav").checked,
     http_proxy: $("#set-proxy").value.trim(),
     ai_base_url: $("#set-ai-url").value.trim(),
     ai_model: $("#set-ai-model").value.trim(),

@@ -25,6 +25,9 @@ DEFAULTS = {
     "extract_audio": False,         # 默认是否提取 MP3
     "download_danmaku": False,      # B站默认是否下载弹幕
     "subscription_interval": 30,    # 订阅检查间隔（分钟）
+    "auto_clean_enabled": False,    # 自动清理：删除超过保留天数的已完成内容
+    "auto_clean_days": 30,          # 保留天数
+    "auto_clean_keep_favorite": True,  # 收藏的内容不清理
     "ai_base_url": "https://open.bigmodel.cn/api/paas/v4",  # OpenAI 兼容端点
     "ai_api_key": "",
     "ai_model": "glm-4-flash",
