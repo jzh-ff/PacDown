@@ -565,6 +565,12 @@ async def set_config(req: Request):
         if v == "__KEEP__":
             continue
         patch[k] = v
+    # 管理密钥防篡改：已设置密钥时，修改必须提供当前密钥（防止访客改掉密钥看统计）
+    if "admin_key" in patch and config.get("admin_key", ""):
+        supplied = (body.get("current_admin_key") or
+                    req.headers.get("x-admin-key") or "")
+        if supplied != config.get("admin_key"):
+            raise HTTPException(403, "修改管理密钥需要提供当前密钥")
     cfg = config.update(patch)
     if "subscription_interval" in patch:
         scheduler.sub_scheduler.restart()
