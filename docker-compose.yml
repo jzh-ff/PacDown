@@ -1,6 +1,11 @@
 services:
   pacdown:
-    build: .
+    build:
+      context: .
+      args:
+        APT_MIRROR: ${APT_MIRROR:-}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    image: pacdown:latest
     container_name: pacdown
     restart: unless-stopped
     ports:
