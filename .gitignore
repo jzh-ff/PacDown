@@ -21,3 +21,9 @@ Thumbs.db
 .idea/
 .vscode/
 .zcode/
+
+# PyInstaller 打包产物
+build/
+dist-app/
+dist/
+PacDown.spec

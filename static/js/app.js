@@ -1727,6 +1727,14 @@ $("#btn-save-settings").addEventListener("click", async () => {
 async function boot() {
   loadDirs();
   updateViewBtn();
+  // 服务器托管了 Windows 客户端时显示下载入口
+  api("/api/app/status").then((s) => {
+    if (s.available) {
+      const a = $("#app-dl-link");
+      a.hidden = false;
+      a.title += `（v${s.updated_at ? s.updated_at.slice(0, 10) : ""} · ${fmtSize(s.size)}）`;
+    }
+  }).catch(() => { /* 忽略 */ });
   pollTasks();
   pollNotifications(true);
   setInterval(() => {

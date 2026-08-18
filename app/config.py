@@ -1,10 +1,14 @@
 """配置管理：读取/保存 config.json，提供默认值。"""
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+# PyInstaller 打包后：exe 所在目录即数据目录（便携模式，config/downloads 都在 exe 旁边）
+if getattr(sys, "frozen", False):
+    ROOT_DIR = Path(sys.executable).resolve().parent
 # Docker 部署时配置可挂载到独立目录（docker-compose 中挂载 /app/config）
 CONFIG_DIR = Path(os.environ.get("PACDOWN_CONFIG_DIR", str(ROOT_DIR)))
 CONFIG_PATH = CONFIG_DIR / "config.json"

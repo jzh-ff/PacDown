@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -28,7 +29,11 @@ from .parsers import douyin as dy_parser
 from .parsers.base import ParseError
 from .parsers.http_download import REFERERS, safe_filename
 
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+# PyInstaller onefile：静态资源在解包目录 _MEIPASS 下；源码运行在项目 static/
+if getattr(sys, "frozen", False):
+    STATIC_DIR = Path(getattr(sys, "_MEIPASS", ".")) / "static"
+else:
+    STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 app = FastAPI(title="PacDown", docs_url=None, redoc_url=None)
 
@@ -747,6 +752,33 @@ async def notifications_read(req: Request):
     n = database.mark_notifications_read(
         [int(x) for x in ids] if isinstance(ids, list) else None)
     return {"ok": True, "marked": n}
+
+
+# ---------------- Windows 客户端分发 ----------------
+
+def _app_exe_path() -> Path:
+    """客户端 exe 位置：环境变量 > 配置项 > 配置目录/appdist/PacDown.exe。"""
+    p = os.environ.get("PACDOWN_APP_EXE") or config.get("app_exe_path") or ""
+    return Path(p) if p else config.CONFIG_DIR / "appdist" / "PacDown.exe"
+
+
+@app.get("/api/app/status")
+def app_status():
+    p = _app_exe_path()
+    if p.exists():
+        st = p.stat()
+        return {"available": True, "name": p.name, "size": st.st_size,
+                "updated_at": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")}
+    return {"available": False}
+
+
+@app.get("/api/app/download")
+def app_download():
+    p = _app_exe_path()
+    if not p.exists():
+        raise HTTPException(404, "客户端文件未上传")
+    return FileResponse(str(p), filename=p.name,
+                        media_type="application/octet-stream")
 
 
 # ---------------- 搬运工作台 ----------------
