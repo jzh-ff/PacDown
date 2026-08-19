@@ -2055,6 +2055,11 @@ async function boot() {
   loadDirs();
   updateViewBtn();
   initStatsNav();
+  // 下载页快捷选项跟随设置里的默认值
+  api("/api/config").then((cfg) => {
+    $("#opt-audio").checked = !!cfg.extract_audio;
+    $("#opt-danmaku").checked = !!cfg.download_danmaku;
+  }).catch(() => { /* 忽略 */ });
   // 服务器托管了 Windows 客户端时显示下载入口
   api("/api/app/status").then((s) => {
     if (s.available) {
