@@ -46,21 +46,21 @@ def _extract_mix_id(url: str) -> str:
 def list_mix(mix_id: str, limit: int = 50) -> dict:
     """列出合集内视频：{name, entries:[{video_id,title,url,cover,duration}]}。
 
-    路径 A（有 Cookie）：PC 合集页 SSR 数据挖掘；路径 B（免 Cookie）：
-    iesdouyin mix/aweme 接口。都失败时抛 ParseError 并附 Cookie 指引。
+    走 douyin web 合集接口 aweme/v1/web/mix/aweme（2026-08 实测免签名可用）；
+    Cookie 路径优先，免 Cookie 兜底，都失败时给出配置指引。
     """
     cookie = (config.get("douyin_cookie") or "").strip()
     last_err = ""
     if cookie:
         try:
-            r = _mix_from_pc(mix_id, cookie, limit)
+            r = _mix_from_api(mix_id, limit, cookie)
             if r["entries"]:
                 return r
-            last_err = "Cookie 已配置但合集页未返回视频数据（Cookie 可能过期）"
+            last_err = "Cookie 已配置但接口未返回合集视频（Cookie 可能过期）"
         except Exception as e:
-            last_err = f"PC 合集页请求失败：{e}"
+            last_err = f"带 Cookie 请求失败：{e}"
     try:
-        r = _mix_from_ies(mix_id, limit)
+        r = _mix_from_api(mix_id, limit, "")
         if r["entries"]:
             return r
         last_err = last_err or "接口未返回合集视频"
@@ -70,71 +70,29 @@ def list_mix(mix_id: str, limit: int = 50) -> dict:
     raise ParseError(f"抖音合集解析失败：{last_err}{hint}")
 
 
-def _mix_from_pc(mix_id: str, cookie: str, limit: int) -> dict:
-    """带 Cookie 请求 PC 合集页，从 SSR 数据挖掘 aweme 列表。"""
-    headers = {"User-Agent": UA_PC, "Referer": "https://www.douyin.com/",
-               "Cookie": cookie}
-    with httpx.Client(headers=headers, follow_redirects=True,
-                      timeout=httpx.Timeout(20, read=40),
-                      proxy=config.get("http_proxy") or None) as c:
-        r = c.get(f"https://www.douyin.com/collection/{mix_id}")
-    if r.status_code != 200:
-        raise ParseError(f"合集页返回 {r.status_code}")
-    html = r.text
-    items: list[dict] = []
-
-    def dig(obj):
-        if len(items) >= limit:
-            return
-        if isinstance(obj, dict):
-            if "aweme_id" in obj and ("desc" in obj or "video" in obj):
-                items.append(obj)
-                return
-            for v in obj.values():
-                dig(v)
-        elif isinstance(obj, list):
-            for v in obj:
-                dig(v)
-
-    data = hd.fetch_json_in_html(html, "_ROUTER_DATA")
-    if data:
-        dig(data)
-    if not items:  # SSR 结构兜底：正则直接挖 awemeId
-        for m in re.finditer(r'"awemeId":\s*"(\d{15,})"', html):
-            items.append({"aweme_id": m.group(1)})
-            if len(items) >= limit:
-                break
-    name = ""
-    m = re.search(r'"mixName":\s*"((?:[^"\\]|\\.){1,120}?)"', html) or \
-        re.search(r'"mix_name":\s*"((?:[^"\\]|\\.){1,120}?)"', html) or \
-        re.search(r"<title>([^<]{1,120}?)</title>", html)
-    if m:
-        raw_name = m.group(1)
-        try:
-            name = json.loads(f'"{raw_name}"')
-        except (json.JSONDecodeError, ValueError):
-            name = raw_name
-        name = name.replace("_抖音", "").strip()
-    return {"name": name, "entries": [_mix_entry(it) for it in items[:limit]]}
-
-
-def _mix_from_ies(mix_id: str, limit: int) -> dict:
-    """免 Cookie：iesdouyin mix/aweme 接口（与评论接口同族，2026-08 前可用）。"""
+def _mix_from_api(mix_id: str, limit: int, cookie: str = "") -> dict:
+    """web 合集接口（cursor 分页）；Referer 指向合集页更像真实浏览。"""
+    headers = {"User-Agent": UA_PC,
+               "Referer": f"https://www.douyin.com/collection/{mix_id}"}
+    if cookie:
+        headers["Cookie"] = cookie
     out: list[dict] = []
     cursor = 0
     name = ""
-    with hd.client("douyin", mobile=True) as c:
+    with httpx.Client(timeout=httpx.Timeout(20, read=40),
+                      proxy=config.get("http_proxy") or None) as c:
         while len(out) < limit:
-            r = c.get(f"https://www.iesdouyin.com/web/api/v2/mix/aweme/"
-                      f"?mix_id={mix_id}&cursor={cursor}&count=20&appid=1128",
-                      headers={"Referer": "https://www.douyin.com/"})
+            r = c.get("https://www.douyin.com/aweme/v1/web/mix/aweme/",
+                      params={"mix_id": mix_id, "cursor": cursor, "count": 20,
+                              "device_platform": "webapp", "aid": "6383"},
+                      headers=headers)
             r.raise_for_status()
             data = r.json()
             awemes = data.get("aweme_list") or []
             if not awemes:
                 break
             out.extend(awemes)
-            mix_info = (awemes[0].get("mix_info") or {}) if awemes else {}
+            mix_info = awemes[0].get("mix_info") or {}
             name = name or (mix_info.get("mix_name") or "")
             if not data.get("has_more"):
                 break
