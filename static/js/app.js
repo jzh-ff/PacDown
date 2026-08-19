@@ -2127,7 +2127,6 @@ const COOKIE_FIELDS = [
   ["set-ks-cookie", "kuaishou_cookie"],
   ["set-xhs-cookie", "xiaohongshu_cookie"],
   ["set-ai-key", "ai_api_key"],
-  ["set-admin-key", "admin_key"],
 ];
 
 async function loadSettings() {
@@ -2148,7 +2147,6 @@ async function loadSettings() {
     $("#set-clean-enabled").checked = !!cfg.auto_clean_enabled;
     $("#set-clean-days").value = cfg.auto_clean_days || 30;
     $("#set-clean-fav").checked = cfg.auto_clean_keep_favorite !== false;
-    $("#set-admin-cur").hidden = cfg.admin_key !== "__SET__";
     $("#set-proxy").value = cfg.http_proxy || "";
     $("#set-ai-url").value = cfg.ai_base_url || "";
     $("#set-ai-model").value = cfg.ai_model || "";
@@ -2181,7 +2179,6 @@ $("#btn-save-settings").addEventListener("click", async () => {
     const input = $(`#${id}`);
     body[key] = input.value.trim() ? input.value.trim() : (input.dataset.set ? "__KEEP__" : "");
   });
-  body.current_admin_key = $("#set-admin-cur").value.trim();
   try {
     await api("/api/config", { method: "POST", body });
     const tip = $("#settings-saved");
