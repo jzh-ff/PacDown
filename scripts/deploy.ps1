@@ -27,8 +27,9 @@ scp pacdown.tgz "${DeployHost}:${DeployDir}/"
 if ($LASTEXITCODE -ne 0) { throw "上传失败" }
 
 Write-Host "==> [4/4] 触发服务器切换（模式：$Mode → $ServerScript）"
-# 通过 stdin 把服务器端脚本推送执行：首次部署服务器上还没有脚本，且始终用本机最新版本
-Get-Content $ServerScript -Raw | ssh $DeployHost "bash -s -- '$DeployDir'"
+# 通过 stdin 推送执行（转 LF 防 CRLF 解析错误；服务器无需预存脚本）
+$lf = (Get-Content $ServerScript -Raw) -replace "`r`n", "`n"
+$lf | ssh $DeployHost "bash -s -- '$DeployDir'"
 if ($LASTEXITCODE -ne 0) { throw "服务器发布失败" }
 
 Remove-Item pacdown.tgz
