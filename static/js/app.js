@@ -1807,7 +1807,7 @@ function renderAdminStats(v, d) {
 /* 纯 SVG 图表（无依赖） */
 function areaChart(data, color) {
   if (!data.length) return `<div class="chart-empty">暂无数据</div>`;
-  const W = 640, H = 160, PAD = 8, PAD_B = 18;
+  const W = 640, H = 168, PAD_X = 12, PAD_T = 26, PAD_B = 18;
   const days = 30;
   const daysMap = new Map(data.map((x) => [x.k, x.n]));
   const keys = [];
@@ -1818,19 +1818,26 @@ function areaChart(data, color) {
   }
   const series = keys.map((k) => daysMap.get(k) || 0);
   const max = Math.max(...series, 1);
-  const x = (i) => PAD + (i / (days - 1)) * (W - PAD * 2);
-  const y = (n) => H - PAD_B - (n / max) * (H - PAD - PAD_B);
+  const x = (i) => PAD_X + (i / (days - 1)) * (W - PAD_X * 2);
+  const y = (n) => H - PAD_B - (n / max) * (H - PAD_T - PAD_B);
   const pts = series.map((n, i) => `${x(i).toFixed(1)},${y(n).toFixed(1)}`);
   const line = `M${pts.join("L")}`;
-  const area = `${line}L${x(days - 1).toFixed(1)},${H - PAD_B}L${PAD},${H - PAD_B}Z`;
+  const area = `${line}L${x(days - 1).toFixed(1)},${H - PAD_B}L${PAD_X},${H - PAD_B}Z`;
   const labels = [0, Math.floor(days / 2), days - 1].map((i) =>
     `<text x="${x(i)}" y="${H - 4}" text-anchor="${i === 0 ? "start" : i === days - 1 ? "end" : "middle"}" class="axis">${keys[i].slice(5)}</text>`).join("");
+  // 峰值标注：文字位置向内收，防止贴边被裁
   const peak = series.indexOf(Math.max(...series));
+  const peakX = Math.min(Math.max(x(peak), 26), W - 30);
+  const peakAnchor = x(peak) > W - 60 ? "end" : x(peak) < 60 ? "start" : "middle";
+  const gridMid = y(max / 2), gridTop = y(max);
   return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="chart">
+    <line x1="${PAD_X}" x2="${W - PAD_X}" y1="${gridTop}" y2="${gridTop}" class="grid"/>
+    <line x1="${PAD_X}" x2="${W - PAD_X}" y1="${gridMid}" y2="${gridMid}" class="grid"/>
+    <line x1="${PAD_X}" x2="${W - PAD_X}" y1="${H - PAD_B}" y2="${H - PAD_B}" class="grid base"/>
     <path d="${area}" fill="${color}" opacity="0.15"/>
     <path d="${line}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round"/>
-    <circle cx="${x(peak)}" cy="${y(series[peak])}" r="3" fill="${color}"/>
-    <text x="${x(peak)}" y="${y(series[peak]) - 6}" text-anchor="middle" class="axis">${series[peak]}</text>
+    <circle cx="${x(peak)}" cy="${y(series[peak])}" r="3.5" fill="${color}" stroke="var(--bg)" stroke-width="1.5"/>
+    <text x="${peakX}" y="${y(series[peak]) - 9}" text-anchor="${peakAnchor}" class="axis peak">${series[peak]}</text>
     ${labels}</svg>`;
 }
 

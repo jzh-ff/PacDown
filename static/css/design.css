@@ -1099,6 +1099,9 @@ body {
 
 .chart { width: 100%; height: auto; display: block; }
 .chart .axis { fill: var(--text-3); font-size: 9px; font-family: inherit; }
+.chart .axis.peak { font-size: 10px; font-weight: 700; fill: var(--text-2); }
+.chart .grid { stroke: var(--border); stroke-width: 1; stroke-dasharray: 3 4; }
+.chart .grid.base { stroke-dasharray: none; opacity: .8; }
 .chart-empty { text-align: center; color: var(--text-3); font-size: 13px; padding: 28px 0; }
 
 .hours-grid { display: flex; gap: 3px; align-items: flex-end; height: 130px; padding-top: 6px; }

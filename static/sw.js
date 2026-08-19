@@ -1,5 +1,5 @@
 /* PacDown Service Worker：仅缓存应用外壳（stale-while-revalidate），绝不缓存 /api */
-const CACHE = "pacdown-shell-v1";
+const CACHE = "pacdown-shell-v2";
 const SHELL = [
   "/",
   "/static/css/design.css",
