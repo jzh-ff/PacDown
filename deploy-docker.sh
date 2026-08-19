@@ -7,7 +7,7 @@ APP_DIR="${1:-/www/wwwroot/pacdown}"
 CONTAINER="pacdown"
 IMAGE="pacdown"
 PORT="8300"
-HEALTH_URL="http://127.0.0.1:${PORT}/api/platforms"
+HEALTH_URL="http://127.0.0.1:${PORT}/api/auth/me"  # 公开端点（v1.3 起 /api 需登录）
 
 # 国内加速（可用环境变量覆盖）：腾讯云内网 apt 镜像 + 清华 PyPI
 export APT_MIRROR="${APT_MIRROR:-mirrors.cloud.tencent.com}"

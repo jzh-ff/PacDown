@@ -7,7 +7,7 @@ set -euo pipefail
 APP_DIR="${1:-/www/wwwroot/pacdown}"
 PM2_NAME="pacdown"
 PORT="8300"
-HEALTH_URL="http://127.0.0.1:${PORT}/api/platforms"
+HEALTH_URL="http://127.0.0.1:${PORT}/api/auth/me"  # 公开端点（v1.3 起 /api 需登录）
 KEEP_RELEASES=3
 PIP_INDEX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 cd "$APP_DIR"
