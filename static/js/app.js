@@ -1969,6 +1969,19 @@ $("#donate-modal").addEventListener("click", (e) => {
   if (e.target.id === "donate-modal") closeDonate();
 });
 
+/* ---------- 教程页 ---------- */
+
+window.goDownloadDemo = () => {
+  $$(".nav-item").forEach((n) => n.classList.toggle("active", n.dataset.page === "download"));
+  $$(".page").forEach((p) => p.classList.toggle("active", p.id === "page-download"));
+  const input = $("#url-input");
+  if (!input.value.trim()) {
+    input.value = "https://www.bilibili.com/video/BV1GJ411x7h7";
+    toast("已填入一条示例链接，点「解析链接」试试");
+  }
+  input.focus();
+};
+
 /* ---------- 设置页 ---------- */
 
 const COOKIE_FIELDS = [

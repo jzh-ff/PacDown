@@ -1175,6 +1175,79 @@ body {
 .rule-ops { display: flex; gap: 6px; flex: none; }
 
 /* ==========================================================================
+   教程页
+   ========================================================================== */
+.guide-toc {
+  display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px;
+  position: sticky; top: 14px; z-index: 20;
+}
+.toc-chip {
+  padding: 5px 14px; border-radius: 999px; font-size: 12.5px;
+  border: 1px solid var(--border); background: var(--surface-solid);
+  color: var(--text-2); text-decoration: none; transition: all .18s;
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+}
+.toc-chip:hover { color: var(--text); border-color: var(--border-hi); }
+
+.guide-body { display: flex; flex-direction: column; gap: 16px; max-width: 980px; }
+.guide-sec { padding: 22px 24px; scroll-margin-top: 70px; }
+.guide-sec h2 { font-size: 17px; font-weight: 700; margin-bottom: 14px; }
+.guide-sec h4 { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+.guide-sec p, .guide-sec li { font-size: 13.5px; color: var(--text-2); line-height: 1.75; }
+.guide-sec ul { padding-left: 18px; display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.guide-sec b { color: var(--text); font-weight: 600; }
+.guide-sec code {
+  font-family: var(--font-num); font-size: 11.5px; color: var(--brand-2);
+  background: rgba(124, 108, 245, .1); border-radius: 5px; padding: 1px 6px;
+}
+.guide-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.guide-cols h4 { padding-bottom: 6px; border-bottom: 1px dashed var(--border); }
+
+.guide-steps { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; }
+.g-step { display: flex; gap: 13px; align-items: flex-start; }
+.g-no {
+  width: 26px; height: 26px; border-radius: 8px; flex: none;
+  display: grid; place-items: center; font-weight: 700; font-size: 13px;
+  font-family: var(--font-num); color: #fff;
+  background: var(--brand-grad); box-shadow: 0 2px 8px var(--brand-glow);
+}
+.g-step h4 { margin: 2px 0 3px; }
+.g-step p { font-size: 13px; }
+
+.guide-shot { margin: 16px 0; }
+.guide-shot img {
+  width: 100%; border-radius: 10px; border: 1px solid var(--border);
+  cursor: zoom-in; display: block;
+  transition: border-color .2s, box-shadow .2s;
+}
+.guide-shot img:hover { border-color: var(--border-hi); box-shadow: var(--shadow-2); }
+.guide-shot figcaption { font-size: 12px; color: var(--text-3); margin-top: 7px; text-align: center; }
+
+.guide-tip {
+  margin-top: 12px; padding: 9px 13px; border-radius: 9px;
+  background: rgba(63, 208, 224, .07); border: 1px solid rgba(63, 208, 224, .2);
+  font-size: 12.5px !important; color: var(--text-2);
+}
+.guide-faq { border-bottom: 1px solid var(--border); padding: 4px 0; }
+.guide-faq:last-child { border-bottom: 0; }
+.guide-faq summary {
+  cursor: pointer; padding: 10px 2px; font-size: 13.5px; font-weight: 600;
+  list-style: none; display: flex; align-items: center; gap: 8px;
+}
+.guide-faq summary::before {
+  content: "+"; font-family: var(--font-num); color: var(--brand-2);
+  font-size: 15px; transition: transform .2s; flex: none;
+}
+.guide-faq[open] summary::before { transform: rotate(45deg); }
+.guide-faq p { padding: 0 2px 12px 22px; }
+.guide-faq a { color: var(--brand-2); }
+
+@media (max-width: 960px) {
+  .guide-cols { grid-template-columns: 1fr; }
+  .guide-toc { top: 10px; }
+}
+
+/* ==========================================================================
    焦点 / 滚动条
    ========================================================================== */
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }

@@ -38,6 +38,10 @@
       <span>下载</span>
       <i class="nav-dot" id="nav-active-dot" hidden></i>
     </button>
+    <button class="nav-item" data-page="guide">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V4a2 2 0 0 0-2-2H6.5A2.5 2.5 0 0 0 4 4.5v15z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/><path d="M9 7h7M9 11h5"/></svg>
+      <span>教程</span>
+    </button>
     <div class="nav-group">收藏</div>
     <button class="nav-item" data-page="history">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9.5l4 2.5-4 2.5z" fill="currentColor" stroke="none"/></svg>
@@ -430,6 +434,151 @@
           <div class="stats-card-head"><h3>最近失败任务</h3></div>
           <div class="table-wrap"><table class="stats-table" id="table-failed"></table></div>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 教程页 ============ -->
+  <section class="page" id="page-guide">
+    <header class="page-head">
+      <div class="eyebrow">获取 · GUIDE</div>
+      <h1>使用教程</h1>
+      <p class="sub">三分钟上手：从粘贴链接到本地收藏</p>
+    </header>
+
+    <div class="guide-toc">
+      <a href="#g-start" class="toc-chip">快速开始</a>
+      <a href="#g-links" class="toc-chip">能下什么</a>
+      <a href="#g-library" class="toc-chip">片库管理</a>
+      <a href="#g-tools" class="toc-chip">工具箱</a>
+      <a href="#g-client" class="toc-chip">Windows 客户端</a>
+      <a href="#g-faq" class="toc-chip">常见问题</a>
+    </div>
+
+    <div class="guide-body">
+      <!-- 快速开始 -->
+      <div class="glass guide-sec" id="g-start">
+        <h2>快速开始</h2>
+        <div class="guide-steps">
+          <div class="g-step">
+            <span class="g-no">1</span>
+            <div>
+              <h4>粘贴链接</h4>
+              <p>复制视频链接或<b>整段分享文案</b>（如“快看这个视频 https://v.douyin.com/…”），一次可以贴多个，每行一个。</p>
+            </div>
+          </div>
+          <div class="g-step">
+            <span class="g-no">2</span>
+            <div>
+              <h4>点「解析链接」</h4>
+              <p>看到封面、标题、作者、时长再决定下不下。合集和博主主页会列出全部视频供勾选。</p>
+            </div>
+          </div>
+          <div class="g-step">
+            <span class="g-no">3</span>
+            <div>
+              <h4>勾选后「开始下载」</h4>
+              <p>进度实时可见，下完自动保存封面与元数据。可同时勾选「提取 MP3」「下载弹幕」。</p>
+            </div>
+          </div>
+        </div>
+        <figure class="guide-shot">
+          <img src="/static/assets/guide/step-download.jpg" alt="下载页" loading="lazy" onclick="openLightbox([{type:'image',src:this.src,caption:this.alt}],0)">
+          <figcaption>下载页：粘贴 → 解析 → 勾选 → 下载</figcaption>
+        </figure>
+        <button class="btn btn-primary" onclick="goDownloadDemo()">现在就去下载页试试</button>
+      </div>
+
+      <!-- 能下什么 -->
+      <div class="glass guide-sec" id="g-links">
+        <h2>能下什么</h2>
+        <div class="guide-cols">
+          <div>
+            <h4>视频平台</h4>
+            <ul>
+              <li><b>哔哩哔哩</b>：视频、分P（链接带 <code>?p=3</code> 指定某一P）、合集批量、弹幕 XML、热评</li>
+              <li><b>抖音</b>：无水印视频、图文图集、合集批量（合集页 <code>douyin.com/collection/…</code>）</li>
+              <li><b>快手 / 小红书</b>：视频与图集</li>
+              <li><b>YouTube 等上千站点</b>：yt-dlp 引擎兜底（需代理）</li>
+            </ul>
+          </div>
+          <div>
+            <h4>直链与 m3u8</h4>
+            <ul>
+              <li>以 <code>.mp4 .zip .jpg .m3u8</code> 等结尾的链接直接下载，支持断点续传</li>
+              <li><b>网盘文件</b>：用浏览器直链插件提取真实地址后粘贴，不走限速通道</li>
+              <li>高级：链接后加 <code>#direct;name=文件名.mp4</code> 可强制直链并指定文件名</li>
+            </ul>
+          </div>
+        </div>
+        <figure class="guide-shot">
+          <img src="/static/assets/guide/step-parse.jpg" alt="解析结果" loading="lazy" onclick="openLightbox([{type:'image',src:this.src,caption:this.alt}],0)">
+          <figcaption>解析后展示封面与信息，分P/合集可展开勾选</figcaption>
+        </figure>
+      </div>
+
+      <!-- 片库管理 -->
+      <div class="glass guide-sec" id="g-library">
+        <h2>片库管理</h2>
+        <ul>
+          <li><b>在线预览</b>：点卡片即播视频（可拖进度条），图集可放大浏览，MP3 可试听</li>
+          <li><b>标签与收藏</b>：详情弹窗里打标签、点 ★ 收藏，片库页可按标签/收藏筛选</li>
+          <li><b>批量管理</b>：工具栏「管理」进入勾选模式，批量删除或导出 CSV</li>
+          <li><b>保存到本机</b>：详情里「保存视频到本机」单个下载，「打包下载 ZIP」连封面弹幕元数据一次带走</li>
+          <li><b>分组视图</b>：按日期 / 平台 / 作者分组，找片更快</li>
+        </ul>
+        <figure class="guide-shot">
+          <img src="/static/assets/guide/step-library.jpg" alt="片库" loading="lazy" onclick="openLightbox([{type:'image',src:this.src,caption:this.alt}],0)">
+          <figcaption>片库：统计、筛选、分组、批量管理</figcaption>
+        </figure>
+      </div>
+
+      <!-- 工具箱 -->
+      <div class="glass guide-sec" id="g-tools">
+        <h2>工具箱</h2>
+        <p>左侧选素材（片库视频/图集，或上传本地文件）→ 右侧选工具调参数 → 开始处理：</p>
+        <ul>
+          <li><b>视频</b>：转码（H.264/H.265/VP9）、压缩、无损剪辑、GIF 动图、文字水印、截帧</li>
+          <li><b>图片</b>：格式转换压缩、拼接长图、图集打包 ZIP</li>
+        </ul>
+        <figure class="guide-shot">
+          <img src="/static/assets/guide/step-tools.jpg" alt="工具箱" loading="lazy" onclick="openLightbox([{type:'image',src:this.src,caption:this.alt}],0)">
+          <figcaption>工具箱：转码 / 剪辑 / GIF / 拼图</figcaption>
+        </figure>
+        <p class="guide-tip">视频类工具需要本机或服务器装有 ffmpeg；图片工具无此要求。</p>
+      </div>
+
+      <!-- Windows 客户端 -->
+      <div class="glass guide-sec" id="g-client">
+        <h2>Windows 客户端</h2>
+        <ul>
+          <li>侧边栏底部点「Windows 客户端」下载 <code>PacDown.exe</code>（约 52MB）</li>
+          <li><b>免安装</b>：双击即用，自动打开浏览器；数据全存在 exe 同目录</li>
+          <li>下载走你自己电脑的网络与磁盘，不占服务器空间</li>
+          <li>杀毒软件误报属正常（未签名），添加信任即可</li>
+        </ul>
+        <p class="guide-tip">想把视频下到本机而不是服务器？用客户端版最直接。</p>
+      </div>
+
+      <!-- FAQ -->
+      <div class="glass guide-sec" id="g-faq">
+        <h2>常见问题</h2>
+        <details class="guide-faq">
+          <summary>抖音 / 小红书解析失败？</summary>
+          <p>这两个平台需要 Cookie：浏览器打开对应网站 → F12 → 网络 → 任一请求的 Cookie 头 → 完整复制到「设置 → 平台 Cookie」。无需登录账号。</p>
+        </details>
+        <details class="guide-faq">
+          <summary>B站提示 412 / 只能下 480P？</summary>
+          <p>在设置里配置 B站 Cookie（<code>SESSDATA=xxx</code> 或 <code>buvid3=xxx</code>）即可；登录态 Cookie 还能解锁 1080P+。</p>
+        </details>
+        <details class="guide-faq">
+          <summary>下完的文件在哪？</summary>
+          <p>下载页输入框下方显示当前目录；详情弹窗「打开所在目录」直达。网页版部署在服务器时，文件在服务器上，用「保存到本机 / 打包下载 ZIP」拉回本地。</p>
+        </details>
+        <details class="guide-faq">
+          <summary>提取 MP3 / 视频工具报错？</summary>
+          <p>需要安装 <a href="https://ffmpeg.org/download.html" target="_blank" rel="noopener">ffmpeg</a> 并加入 PATH；Windows 独立版与 Docker 版已内置。</p>
+        </details>
       </div>
     </div>
   </section>
