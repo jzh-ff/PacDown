@@ -25,12 +25,15 @@ TOOLS = {
     "gif": "GIF 动图",
     "watermark": "文字水印",
     "frame": "截帧",
+    "danmaku2ass": "弹幕转字幕",
+    "burn_sub": "字幕压制",
     "img_convert": "图片转换/压缩",
     "img_join": "拼接长图",
     "img_zip": "图集打包 ZIP",
 }
 
-VIDEO_TOOLS = {"mp3", "transcode", "compress", "trim", "gif", "watermark", "frame"}
+VIDEO_TOOLS = {"mp3", "transcode", "compress", "trim", "gif", "watermark",
+               "frame", "danmaku2ass", "burn_sub"}
 IMAGE_TOOLS = {"img_convert", "img_join", "img_zip"}
 
 _IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -69,12 +72,15 @@ def save_upload(filename: str, data: bytes) -> dict:
 
 # ---------------- 素材解析 ----------------
 
-def resolve_video(video_id: int = 0, upload: str = "") -> tuple[Path, str]:
-    """解析视频源：片库记录或上传文件。返回 (路径, 展示名)。"""
+def resolve_video(video_id: int = 0, upload: str = "",
+                  user_id: int = 0) -> tuple[Path, str]:
+    """解析视频源：本人片库记录或上传文件。返回 (路径, 展示名)。"""
     if video_id:
         v = database.get_video(video_id)
         if not v or not v.get("file_path"):
             raise ValueError("该记录没有视频文件")
+        if v.get("user_id") != user_id:
+            raise ValueError("无权使用该素材")
         p = Path(v["file_path"])
         if not p.exists():
             raise ValueError("文件已被移动或删除")
@@ -87,10 +93,13 @@ def resolve_video(video_id: int = 0, upload: str = "") -> tuple[Path, str]:
     raise ValueError("请先选择素材")
 
 
-def resolve_images(video_id: int = 0, upload: str = "") -> tuple[list[Path], str]:
-    """解析图片源：图集记录的全部图片，或单个上传图片。"""
+def resolve_images(video_id: int = 0, upload: str = "",
+                   user_id: int = 0) -> tuple[list[Path], str]:
+    """解析图片源：本人图集记录的全部图片，或单个上传图片。"""
     if video_id:
         v = database.get_video(video_id)
+        if v.get("user_id") != user_id:
+            raise ValueError("无权使用该素材")
         imgs = [Path(x) for x in json.loads(v.get("images") or "[]")]
         imgs = [p for p in imgs if p.exists()]
         if not imgs and v and v.get("cover_path") and Path(v["cover_path"]).exists():
@@ -255,7 +264,110 @@ def _do_video_tool(kind: str, src: Path, stem: str, params: dict, progress) -> d
             postprocess.extract_frame(str(src), str(dst), at_sec=float(at or 2))
         return {"out": dst}
 
+    if kind == "danmaku2ass":
+        # 素材=视频记录：读取同目录弹幕 XML → 转 ASS 字幕
+        danmaku = _find_sidecar(src, ".xml")
+        if not danmaku:
+            raise RuntimeError("未找到弹幕文件（下载时需勾选「下载弹幕」）")
+        dst = out / f"{stem}.ass"
+        progress(20)
+        _xml_to_ass(danmaku, dst)
+        progress(100)
+        return {"out": dst}
+
+    if kind == "burn_sub":
+        if not postprocess.ffmpeg_available():
+            raise RuntimeError("未检测到 ffmpeg，无法压制字幕")
+        sub = _find_sidecar(src, (".ass", ".srt"))
+        if not sub:
+            raise RuntimeError("未找到字幕文件（先用「弹幕转字幕」或下载 CC 字幕生成 .ass/.srt）")
+        dst = out / f"{stem}_burned.mp4"
+        # ffmpeg subtitles filter 需要转义路径
+        sub_path = str(sub).replace("\\", "/").replace(":", "\\:")
+        _run_ffmpeg(["-i", str(src), "-vf", f"subtitles='{sub_path}'",
+                     "-c:a", "copy", str(dst)], dur, progress)
+        return {"out": dst}
+
     raise ValueError(f"未知视频工具：{kind}")
+
+
+def _find_sidecar(src: Path, exts) -> Path | None:
+    """在视频同目录找同名伴生文件（弹幕 xml / 字幕 ass/srt）。"""
+    if isinstance(exts, str):
+        exts = (exts,)
+    for ext in exts:
+        p = src.with_suffix(ext)
+        if p.exists():
+            return p
+    return None
+
+
+def _xml_to_ass(xml_path: Path, out_path: Path) -> None:
+    """弹幕 XML → ASS 字幕（滚动/顶部/底部三类，时间轴按视频时长归一）。"""
+    import xml.etree.ElementTree as ET
+    from datetime import timedelta
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    total = float(root.get("maxlimit") or 0)
+    duration = 0.0
+    if total:
+        duration = total
+    else:
+        video = root.find("video")
+        if video is not None:
+            duration = float(video.get("duration") or 0)
+    if not duration:
+        duration = 100.0  # 兜底
+
+    def ts(ms: float) -> str:
+        t = timedelta(milliseconds=ms)
+        h = t.seconds // 3600
+        m = (t.seconds % 3600) // 60
+        s = t.seconds % 60
+        cs = t.microseconds // 10000
+        return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+    header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Scroll,Microsoft YaHei,54,&H00FFFFFF,&H000000FF,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,3,0,2,80,80,140,1
+Style: Top,Microsoft YaHei,54,&H00FFFFFF,&H000000FF,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,3,0,8,80,80,50,1
+Style: Bottom,Microsoft YaHei,54,&H00FFFFFF,&H000000FF,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,3,0,2,80,80,50,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    lines = [header]
+    for d in root.iter("d"):
+        try:
+            # p 属性格式：时间(ms),模式,字号,颜色,时间戳
+            parts = (d.get("p") or "").split(",")
+            t = float(parts[0]) if parts and parts[0].strip() else 0.0
+            mode = int(parts[1]) if len(parts) > 1 and parts[1].strip() else 0
+            text = (d.text or "").replace("\n", "")
+            if not text:
+                continue
+            dur = 4000.0
+            if mode & 1:  # 滚动（含底部滚动 5）
+                style = "Scroll"
+                if total and t + dur > total:
+                    dur = max(1000.0, total - t)
+            elif mode & 4:  # 底部
+                style = "Bottom"
+                dur = 5000.0
+            else:  # 顶部
+                style = "Top"
+                dur = 5000.0
+            lines.append(
+                f"Dialogue: 0,{ts(t)},{ts(t + dur)},{style},,0,0,0,,{text}")
+        except (ValueError, TypeError):
+            continue
+    out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
 # ---------------- 图片工具（Pillow） ----------------
@@ -342,14 +454,15 @@ def run_job(jid: int) -> None:
         params = json.loads(job["params"] or "{}")
         src = job["src"]  # video:{id} / upload:{name}
         stype, _, sval = src.partition(":")
+        uid = job.get("user_id") or 0
         kind = job["kind"]
         if kind in VIDEO_TOOLS:
             path, stem = resolve_video(int(sval) if stype == "video" else 0,
-                                       sval if stype == "upload" else "")
+                                       sval if stype == "upload" else "", uid)
             result = _do_video_tool(kind, path, stem, params, progress)
         else:
             images, stem = resolve_images(int(sval) if stype == "video" else 0,
-                                          sval if stype == "upload" else "")
+                                          sval if stype == "upload" else "", uid)
             result = _do_image_tool(kind, images, stem, params, progress)
         database.update_tool_job(
             jid, status="done", progress=100, finished_at=database.now(),
@@ -379,21 +492,21 @@ class ToolManager:
         self._stop.set()
         self._wake.set()
 
-    def create(self, kind: str, src: str, params: dict) -> int:
+    def create(self, kind: str, src: str, params: dict, user_id: int = 0) -> int:
         if kind not in TOOLS:
             raise ValueError("未知工具")
-        # 入队前先校验素材可用，错误直接抛给前端
+        # 入队前先校验素材可用与归属，错误直接抛给前端
         stype, _, sval = src.partition(":")
         if kind in VIDEO_TOOLS:
             resolve_video(int(sval) if stype == "video" else 0,
-                          sval if stype == "upload" else "")
+                          sval if stype == "upload" else "", user_id)
         else:
             resolve_images(int(sval) if stype == "video" else 0,
-                           sval if stype == "upload" else "")
+                           sval if stype == "upload" else "", user_id)
         jid = database.insert_tool_job({
             "kind": kind, "src": src, "status": "pending",
             "params": json.dumps(params or {}, ensure_ascii=False),
-        })
+        }, user_id=user_id)
         self._wake.set()
         return jid
 

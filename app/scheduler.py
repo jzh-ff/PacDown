@@ -357,7 +357,8 @@ def check_subscription(sub: dict) -> int:
     for v in videos:
         if not v["video_id"]:
             continue
-        if database.find_by_video_id(sub["platform"], v["video_id"]):
+        if database.find_by_video_id(sub["platform"], v["video_id"],
+                                     sub.get("user_id") or 0):
             continue
         try:
             options = {
@@ -368,7 +369,8 @@ def check_subscription(sub: dict) -> int:
                                                  bool(config.get("download_danmaku", False))),
                 "from_subscription": sub["id"],
             }
-            manager.create_task(v["url"], options, force=False)
+            manager.create_task(v["url"], options, force=False,
+                                user_id=sub.get("user_id") or 0)
             new_count += 1
         except Exception:
             continue  # 单个视频失败不影响整批
@@ -378,7 +380,7 @@ def check_subscription(sub: dict) -> int:
         new_count=sub["new_count"] + new_count)
     if new_count:
         database.insert_notification(
-            "subscription",
+            sub.get("user_id") or 0, "subscription",
             f"「{sub['uploader_name']}」更新 {new_count} 个视频",
             "已自动加入下载队列")
     return new_count
@@ -419,10 +421,13 @@ def auto_clean_once() -> dict:
     result = {"videos": len(rows), "freed_bytes": freed,
               "tool_outputs": tools_cleaned, "uploads": uploads_cleaned}
     if rows or tools_cleaned or uploads_cleaned:
-        database.insert_notification(
-            "system",
-            f"自动清理：{len(rows)} 个视频、{tools_cleaned} 个工具产物、{uploads_cleaned} 个上传文件",
-            f"已删除超过 {days} 天的完成内容，释放约 {freed / 1024 / 1024:.0f} MB 磁盘空间")
+        admin = database.query_one(
+            "SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1")
+        if admin:
+            database.insert_notification(
+                admin["id"], "system",
+                f"自动清理：{len(rows)} 个视频、{tools_cleaned} 个工具产物、{uploads_cleaned} 个上传文件",
+                f"已删除超过 {days} 天的完成内容，释放约 {freed / 1024 / 1024:.0f} MB 磁盘空间")
     return result
 
 

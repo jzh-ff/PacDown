@@ -953,7 +953,13 @@ body {
 }
 @keyframes toastin { from { opacity: 0; transform: translateX(30px); } }
 .toast.out { opacity: 0; transform: translateX(30px); transition: all .3s; }
-.toast .t-icon { width: 17px; height: 17px; flex: none; margin-top: 1px; }
+.toast .t-body { flex: 1; min-width: 0; }
+.t-action {
+  flex: none; border: 1px solid rgba(255, 209, 102, .5); background: rgba(255, 209, 102, .1);
+  color: #ffd166; border-radius: 999px; font: inherit; font-size: 12px;
+  padding: 4px 12px; cursor: pointer; transition: all .18s; white-space: nowrap;
+}
+.t-action:hover { background: rgba(255, 209, 102, .22); }
 .toast.ok { border-left: 3px solid var(--ok); }
 .toast.ok .t-icon { color: var(--ok); }
 .toast.err { border-left: 3px solid var(--err); }
@@ -1228,6 +1234,14 @@ body {
   background: rgba(63, 208, 224, .07); border: 1px solid rgba(63, 208, 224, .2);
   font-size: 12.5px !important; color: var(--text-2);
 }
+.guide-donate { text-align: center; }
+.guide-donate p { max-width: 520px; margin: 0 auto 16px; }
+.guide-donate img {
+  width: 168px; height: 168px; object-fit: contain; border-radius: 14px;
+  background: #fff; border: 1px solid var(--border); cursor: zoom-in;
+  transition: box-shadow .2s;
+}
+.guide-donate img:hover { box-shadow: var(--shadow-2); }
 .guide-faq { border-bottom: 1px solid var(--border); padding: 4px 0; }
 .guide-faq:last-child { border-bottom: 0; }
 .guide-faq summary {
@@ -1246,6 +1260,56 @@ body {
   .guide-cols { grid-template-columns: 1fr; }
   .guide-toc { top: 10px; }
 }
+
+/* 登录 / 注册 */
+.auth-mask {
+  position: fixed; inset: 0; z-index: 300;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg); overflow-y: auto;
+}
+.auth-card { width: 360px; max-width: calc(100vw - 32px); padding: 36px 32px 28px; }
+.auth-logo { display: flex; align-items: center; gap: 10px; justify-content: center; margin-bottom: 6px; }
+.auth-title { font-size: 21px; font-weight: 700; font-family: var(--font-num); letter-spacing: .5px; }
+.auth-title em {
+  font-style: normal;
+  background: var(--brand-text-grad);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+}
+.auth-sub { text-align: center; color: var(--text-2); font-size: 12.5px; margin-bottom: 22px; }
+.auth-tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 18px; }
+.auth-tab {
+  flex: 1; padding: 9px 0; background: none; border: 0; cursor: pointer;
+  color: var(--text-3); font: inherit; font-size: 13.5px; font-weight: 600;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  transition: color .2s, border-color .2s;
+}
+.auth-tab.active { color: var(--text); border-bottom-color: var(--brand-1); }
+.auth-form { display: flex; flex-direction: column; gap: 12px; }
+.auth-form input {
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg-2);
+  color: var(--text); font: inherit; padding: 11px 13px; outline: none;
+  transition: border-color .2s, box-shadow .2s;
+}
+.auth-form input:focus { border-color: var(--brand-1); box-shadow: 0 0 0 3px var(--focus); }
+.auth-btn { width: 100%; padding: 11px; font-size: 14px; }
+.auth-err {
+  color: var(--err); font-size: 12.5px; background: rgba(242, 100, 90, .08);
+  border: 1px solid rgba(242, 100, 90, .25); border-radius: 9px; padding: 8px 12px;
+}
+.auth-hint { text-align: center; color: var(--text-3); font-size: 12px; margin-top: 12px; }
+
+/* 账号 chip */
+.user-chip {
+  display: flex; align-items: center; gap: 6px; max-width: 100%;
+  padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text-2); font: inherit; font-size: 12px;
+}
+.user-chip svg { width: 13px; height: 13px; flex: none; }
+.user-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-line { display: flex; align-items: center; gap: 10px; }
+.account-line b { font-size: 14px; }
+#form-account .opt-chip input { display: none; }
 
 /* ==========================================================================
    焦点 / 滚动条

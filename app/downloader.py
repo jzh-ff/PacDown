@@ -70,17 +70,20 @@ class DownloadManager:
         info = parser.parse(url)
         return self._info_to_dict(parser, info)
 
-    def create_task(self, url: str, options: dict, force: bool = False) -> dict:
+    def create_task(self, url: str, options: dict, force: bool = False,
+                    user_id: int = 0, username: str = "") -> dict:
         """立即入库（parsing 状态），解析由 worker 后台完成——点击下载零等待。"""
         from .parsers import guess_platform
         options = dict(options)
         options["_force"] = bool(force)
+        if username:
+            options["_username"] = username  # 下载目录的用户名层级
         vid = database.insert_video({
             "platform": guess_platform(url) or "generic",
             "source_url": url,
             "status": "parsing",
             "options": json.dumps(options, ensure_ascii=False),
-        })
+        }, user_id=user_id)
         self._wake.set()
         return {"duplicate": False, "id": vid}
 
@@ -147,7 +150,8 @@ class DownloadManager:
     def _notify_failure(task: dict, err: str) -> None:
         try:
             title = (task.get("title") or task.get("source_url") or "任务")[:40]
-            database.insert_notification("task", f"《{title}》下载失败", err[:150])
+            database.insert_notification(task.get("user_id") or 0,
+                                         "task", f"《{title}》下载失败", err[:150])
         except Exception:
             pass
 
@@ -193,9 +197,12 @@ class DownloadManager:
         parser = dispatch(task["source_url"])
         database.update_video(vid, status="downloading", progress=0, speed="", error="")
 
-        # 目标目录：下载目录/平台/作者/
+        # 目标目录：下载目录/用户名/平台/作者/（多用户文件隔离）
+        options = json.loads(task["options"] or "{}")
+        username = safe_filename(options.get("_username") or "", 30) or "user"
         author = safe_filename(task["author"] or "未知作者", 40)
-        dest_dir = Path(config.get("download_dir")) / task["platform"] / author
+        dest_dir = (Path(config.get("download_dir")) / username
+                    / task["platform"] / author)
         prefix = safe_filename(
             render_name(config.get("name_template", "{date}_{title}"), task), 90)
 
@@ -258,6 +265,19 @@ class DownloadManager:
                 fields["danmaku_path"] = ""
                 database.update_video(vid, error=f"弹幕失败：{str(e)[:100]}")
 
+        # B站 CC 字幕（无字幕时静默跳过）
+        if task["platform"] == "bilibili" and options.get("download_subtitle"):
+            try:
+                cid = parser.get_cid(task["video_id"])
+                bvid = re.split(r"_p\d+$", task["video_id"] or "")[0]
+                if cid:
+                    srt = postprocess.fetch_bilibili_subtitle(bvid, cid)
+                    if srt:
+                        (same_dir / f"{stem}.srt").write_text(srt, encoding="utf-8")
+                        fields["subtitle_path"] = str(same_dir / f"{stem}.srt")
+            except Exception as e:
+                database.update_video(vid, error=f"字幕失败：{str(e)[:100]}")
+
         # 评论抓取：B站热评（av 号）/ 抖音热评（ies v2 免登录接口）
         if options.get("fetch_comments"):
             try:
@@ -296,10 +316,11 @@ class DownloadManager:
 
     @staticmethod
     def _apply_auto_rules(vid: int, task: dict) -> None:
-        """下载完成后评估自动规则：命中的动作入工具箱队列异步执行。"""
+        """下载完成后评估本人自动规则：命中的动作入工具箱队列异步执行。"""
         from . import toolbox
         try:
-            rules = [r for r in database.list_rules() if r["enabled"]]
+            rules = [r for r in database.list_rules(task.get("user_id") or 0)
+                     if r["enabled"]]
             if not rules:
                 return
             v = database.get_video(vid) or {}
@@ -318,7 +339,9 @@ class DownloadManager:
                 for act in json.loads(rule["actions"] or "[]"):
                     try:
                         toolbox.tool_manager.create(
-                            act.get("kind", ""), f"video:{vid}", act.get("params") or {})
+                            act.get("kind", ""), f"video:{vid}",
+                            act.get("params") or {},
+                            user_id=task.get("user_id") or 0)
                         queued = True
                     except Exception:
                         continue

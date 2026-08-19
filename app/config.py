@@ -25,11 +25,13 @@ DEFAULTS = {
     "xiaohongshu_cookie": "",
     "http_proxy": "",               # 例 http://127.0.0.1:7890
     "speed_limit_mb": 0,            # 全局限速 MB/s（0 不限；单任务=全局/并发数）
-    "admin_key": "",                # 管理面板密钥（空=统计面板隐藏）
+    "admin_key": "",                # 已废弃（v1.3 起统计面板归 admin 账号），保留字段兼容
+    "allow_register": True,         # 是否允许新用户注册
     "name_template": "{date}_{title}",          # 文件名模板（目录固定 平台/作者/）
     "default_quality": "best",      # best 或具体清晰度 id
     "extract_audio": False,         # 默认是否提取 MP3
     "download_danmaku": False,      # B站默认是否下载弹幕
+    "download_subtitle": False,     # B站默认是否下载 CC 字幕
     "subscription_interval": 30,    # 订阅检查间隔（分钟）
     "auto_clean_enabled": False,    # 自动清理：删除超过保留天数的已完成内容
     "auto_clean_days": 30,          # 保留天数

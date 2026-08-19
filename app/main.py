@@ -16,7 +16,7 @@ from urllib.parse import quote, urlparse
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
@@ -36,6 +36,97 @@ else:
     STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 app = FastAPI(title="PacDown", docs_url=None, redoc_url=None)
+
+
+# ---------------- 认证：多用户（httpOnly cookie 会话） ----------------
+
+AUTH_COOKIE = "pacdown_session"
+
+
+def current_user(request: Request) -> dict:
+    """FastAPI 依赖：未登录抛 401。"""
+    token = request.cookies.get(AUTH_COOKIE) or ""
+    u = database.session_user(token)
+    if not u:
+        raise HTTPException(401, "请先登录")
+    return u
+
+
+def admin_only(user: dict = Depends(current_user)) -> dict:
+    if user.get("role") != "admin":
+        raise HTTPException(403, "仅管理员可操作")
+    return user
+
+
+@app.post("/api/auth/register")
+async def register(req: Request):
+    body = await req.json()
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+    if not re.fullmatch(r"[A-Za-z0-9_\u4e00-\u9fa5]{2,20}", username):
+        raise HTTPException(400, "用户名需为 2-20 位字母/数字/下划线/中文")
+    if len(password) < 6:
+        raise HTTPException(400, "密码至少 6 位")
+    if not config.get("allow_register", True):
+        raise HTTPException(403, "注册已关闭，请联系管理员创建账号")
+    first = database.user_count() == 0
+    role = "admin" if first else "user"
+    uid = database.create_user(username, password, role)
+    if not uid:
+        raise HTTPException(409, "用户名已被占用")
+    if first:
+        adopted = database.adopt_orphan_data(uid)  # 首个 admin 继承存量数据
+    token = database.create_session(uid)
+    resp = JSONResponse({"ok": True, "user": {"id": uid, "username": username,
+                                              "role": role}})
+    resp.set_cookie(AUTH_COOKIE, token, httponly=True, samesite="lax",
+                    max_age=30 * 24 * 3600, path="/")
+    return resp
+
+
+@app.post("/api/auth/login")
+async def login(req: Request):
+    body = await req.json()
+    u = database.verify_user((body.get("username") or "").strip(),
+                             body.get("password") or "")
+    if not u:
+        raise HTTPException(401, "用户名或密码错误")
+    token = database.create_session(u["id"])
+    resp = JSONResponse({"ok": True, "user": {"id": u["id"], "username": u["username"],
+                                              "role": u["role"]}})
+    resp.set_cookie(AUTH_COOKIE, token, httponly=True, samesite="lax",
+                    max_age=30 * 24 * 3600, path="/")
+    return resp
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request):
+    database.delete_session(request.cookies.get(AUTH_COOKIE) or "")
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(AUTH_COOKIE, path="/")
+    return resp
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    token = request.cookies.get(AUTH_COOKIE) or ""
+    u = database.session_user(token)
+    if not u:
+        return {"user": None}
+    return {"user": u, "allow_register": bool(config.get("allow_register", True))}
+
+
+@app.post("/api/auth/password")
+async def change_password(request: Request, user: dict = Depends(current_user)):
+    body = await req.json()
+    old = body.get("old_password") or ""
+    new = body.get("new_password") or ""
+    if len(new) < 6:
+        raise HTTPException(400, "新密码至少 6 位")
+    if not database.verify_user(user["username"], old):
+        raise HTTPException(401, "原密码错误")
+    database.update_password(user["id"], new)
+    return {"ok": True}
 
 
 @app.middleware("http")
@@ -83,7 +174,7 @@ def sw_js():
 
 
 @app.get("/api/platforms")
-def platforms():
+def platforms(user: dict = Depends(current_user)):
     return {"platforms": PLATFORM_META,
             "ffmpeg": postprocess.ffmpeg_available()}
 
@@ -91,7 +182,7 @@ def platforms():
 # ---------------- 解析 / 下载 ----------------
 
 @app.post("/api/parse")
-async def parse(req: Request):
+async def parse(req: Request, user: dict = Depends(current_user)):
     body = await req.json()
     urls = extract_urls(body.get("text") or "")
     results = []
@@ -163,7 +254,7 @@ def _parse_one(u: str) -> dict:
 
 
 @app.get("/api/collection")
-def collection(platform: str = "", id: str = ""):
+def collection(platform: str = "", id: str = "", user: dict = Depends(current_user)):
     """懒加载合集完整列表（前端点击「下载整个合集」时调用）。"""
     if platform == "douyin" and id:
         try:
@@ -175,7 +266,7 @@ def collection(platform: str = "", id: str = ""):
 
 
 @app.post("/api/download")
-async def download(req: Request):
+async def download(req: Request, user: dict = Depends(current_user)):
     body = await req.json()
     urls = extract_urls(body.get("text") or "")
     if not urls:
@@ -186,12 +277,14 @@ async def download(req: Request):
     options.setdefault("quality", config.get("default_quality", "best"))
     options.setdefault("extract_audio", bool(config.get("extract_audio", False)))
     options.setdefault("download_danmaku", bool(config.get("download_danmaku", False)))
+    options.setdefault("download_subtitle", bool(config.get("download_subtitle", False)))
     force = bool(body.get("force", False))
 
     results = []
     for u in urls[:50]:
         try:
-            r = manager.create_task(u, options, force=force)
+            r = manager.create_task(u, options, force=force,
+                                    user_id=user["id"], username=user["username"])
             results.append({"url": u, "status": "queued", "id": r["id"]})
         except Exception as e:
             results.append({"url": u, "status": "failed", "error": str(e)[:200]})
@@ -199,23 +292,31 @@ async def download(req: Request):
 
 
 @app.get("/api/tasks")
-def tasks():
-    return {"tasks": [_task_view(t) for t in database.active_tasks()]}
+def tasks(user: dict = Depends(current_user)):
+    return {"tasks": [_task_view(t) for t in database.active_tasks(user["id"])]}
+
+
+def _own_video(vid: int, user: dict) -> dict:
+    v = database.get_video(vid)
+    if not v:
+        raise HTTPException(404, "任务不存在")
+    if v.get("user_id") != user["id"]:
+        raise HTTPException(403, "无权操作该记录")
+    return v
 
 
 @app.post("/api/tasks/{vid}/retry")
-def retry_task(vid: int):
+def retry_task(vid: int, user: dict = Depends(current_user)):
+    _own_video(vid, user)
     if not manager.retry(vid):
         raise HTTPException(400, "仅失败的任务可重试")
     return {"ok": True}
 
 
 @app.delete("/api/tasks/{vid}")
-def dismiss_task(vid: int):
+def dismiss_task(vid: int, user: dict = Depends(current_user)):
     """清理 duplicate 提示记录（前端展示后调用）。"""
-    v = database.get_video(vid)
-    if not v:
-        raise HTTPException(404, "任务不存在")
+    v = _own_video(vid, user)
     if v["status"] not in ("duplicate", "failed"):
         raise HTTPException(400, "仅提示类任务可移除")
     database.delete_video(vid)
@@ -223,17 +324,19 @@ def dismiss_task(vid: int):
 
 
 @app.post("/api/tasks/clear")
-def clear_tasks():
-    """一键清理全部失败/重复提示任务。"""
+def clear_tasks(user: dict = Depends(current_user)):
+    """一键清理本人全部失败/重复提示任务。"""
     cur = database.execute(
-        "DELETE FROM videos WHERE status IN ('failed','duplicate')")
+        "DELETE FROM videos WHERE user_id=? AND status IN ('failed','duplicate')",
+        (user["id"],))
     return {"ok": True, "removed": cur.rowcount}
 
 
 @app.post("/api/tasks/retry_all")
-def retry_all_tasks():
-    """全部失败任务重新入队。"""
-    rows = database.query("SELECT id FROM videos WHERE status='failed'")
+def retry_all_tasks(user: dict = Depends(current_user)):
+    """本人全部失败任务重新入队。"""
+    rows = database.query("SELECT id FROM videos WHERE user_id=? AND status='failed'",
+                          (user["id"],))
     n = 0
     for r in rows:
         if manager.retry(r["id"]):
@@ -252,20 +355,22 @@ def _task_view(t: dict) -> dict:
 
 @app.get("/api/history")
 def history(platform: str = "", status: str = "", keyword: str = "",
-            page: int = 1, size: int = 24, favorite: int = 0, tag: str = ""):
+            page: int = 1, size: int = 24, favorite: int = 0, tag: str = "",
+            user: dict = Depends(current_user)):
     rows, total = database.history(platform, status, keyword, page, size,
-                                   favorite=favorite, tag=tag)
+                                   favorite=favorite, tag=tag, user_id=user["id"])
     return {"items": [_row_public(r) for r in rows], "total": total,
             "page": page, "size": size}
 
 
 @app.get("/api/history/groups")
 def history_groups(platform: str = "", status: str = "", keyword: str = "",
-                   group_by: str = "date", favorite: int = 0, tag: str = ""):
+                   group_by: str = "date", favorite: int = 0, tag: str = "",
+                   user: dict = Depends(current_user)):
     if group_by not in ("date", "platform", "author"):
         raise HTTPException(400, "group_by 仅支持 date/platform/author")
     groups = database.history_groups(platform, status, keyword, group_by,
-                                     favorite=favorite, tag=tag)
+                                     favorite=favorite, tag=tag, user_id=user["id"])
     return {"groups": [
         {"key": g["key"], "label": g["label"], "count": g["count"],
          "size": g["size"], "items": [_row_public(r) for r in g["items"]]}
@@ -274,23 +379,24 @@ def history_groups(platform: str = "", status: str = "", keyword: str = "",
 
 
 @app.get("/api/history/tags")
-def history_tags():
-    return {"tags": database.list_tags()}
+def history_tags(user: dict = Depends(current_user)):
+    return {"tags": database.list_tags(user["id"])}
 
 
 @app.get("/api/history/stats")
-def history_stats():
-    return database.stats()
+def history_stats(user: dict = Depends(current_user)):
+    return database.stats(user["id"])
 
 
 @app.get("/api/history/export")
-def export_csv(ids: str = ""):
-    """导出 CSV；ids 为逗号分隔的 id 列表时只导出选中项。"""
+def export_csv(ids: str = "", user: dict = Depends(current_user)):
+    """导出 CSV；ids 为逗号分隔的 id 列表时只导出选中项（限本人）。"""
     if ids.strip():
         id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()][:500]
-        rows = [r for r in (database.get_video(i) for i in id_list) if r]
+        rows = [r for r in (database.get_video(i) for i in id_list)
+                if r and r.get("user_id") == user["id"]]
     else:
-        rows, _ = database.history(size=100000, page=1)
+        rows, _ = database.history(size=100000, page=1, user_id=user["id"])
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["ID", "平台", "标题", "作者", "时长(秒)", "发布时间",
@@ -308,19 +414,15 @@ def export_csv(ids: str = ""):
 
 
 @app.get("/api/history/{vid}")
-def history_detail(vid: int):
-    v = database.get_video(vid)
-    if not v:
-        raise HTTPException(404, "记录不存在")
+def history_detail(vid: int, user: dict = Depends(current_user)):
+    v = _own_video(vid, user)
     return _row_public(v, full=True)
 
 
 @app.patch("/api/history/{vid}")
-async def patch_history(vid: int, req: Request):
-    """更新标签 / 收藏等用户字段。"""
-    v = database.get_video(vid)
-    if not v:
-        raise HTTPException(404, "记录不存在")
+async def patch_history(vid: int, req: Request, user: dict = Depends(current_user)):
+    """更新标签 / 收藏 / 标题 / 作者 / 描述等用户字段。"""
+    v = _own_video(vid, user)
     body = await req.json()
     fields = {}
     if "tags" in body:
@@ -331,22 +433,24 @@ async def patch_history(vid: int, req: Request):
         fields["tags"] = json.dumps(tags, ensure_ascii=False)
     if "favorite" in body:
         fields["favorite"] = 1 if body["favorite"] else 0
+    for k in ("title", "author", "description"):
+        if k in body:
+            fields[k] = str(body[k] or "").strip()[:500]
     if fields:
         database.update_video(vid, **fields)
     return {"ok": True, **fields}
 
 
 @app.delete("/api/history/{vid}")
-def delete_history(vid: int, keep_files: bool = True):
-    v = database.delete_video(vid)
-    if not v:
-        raise HTTPException(404, "记录不存在")
+def delete_history(vid: int, keep_files: bool = True, user: dict = Depends(current_user)):
+    v = _own_video(vid, user)
+    database.delete_video(vid)
     removed = [] if keep_files else remove_video_files(v)
     return {"ok": True, "files_removed": removed}
 
 
 @app.post("/api/history/batch_delete")
-async def batch_delete(req: Request):
+async def batch_delete(req: Request, user: dict = Depends(current_user)):
     body = await req.json()
     ids = [int(x) for x in (body.get("ids") or []) if str(x).isdigit()][:500]
     keep_files = bool(body.get("keep_files", True))
@@ -354,9 +458,8 @@ async def batch_delete(req: Request):
         raise HTTPException(400, "未选择记录")
     deleted, files_removed = 0, []
     for vid in ids:
-        v = database.delete_video(vid)
-        if not v:
-            continue
+        v = _own_video(vid, user)
+        database.delete_video(vid)
         deleted += 1
         if not keep_files:
             files_removed += remove_video_files(v)
@@ -365,8 +468,8 @@ async def batch_delete(req: Request):
 
 
 @app.post("/api/history/{vid}/open")
-def open_folder(vid: int):
-    v = database.get_video(vid)
+def open_folder(vid: int, user: dict = Depends(current_user)):
+    v = _own_video(vid, user)
     if not v or not v.get("file_path"):
         raise HTTPException(404, "文件不存在")
     p = Path(v["file_path"])
@@ -389,15 +492,13 @@ def _silent_unlink(path: str) -> None:
 
 
 @app.get("/api/history/{vid}/zip")
-def history_zip(vid: int):
+def history_zip(vid: int, user: dict = Depends(current_user)):
     """把该记录的全部产物（视频/图集/封面/音频/弹幕/sidecar）打成 ZIP 供浏览器保存到本机。"""
-    v = database.get_video(vid)
-    if not v:
-        raise HTTPException(404, "记录不存在")
+    v = _own_video(vid, user)
     if v["status"] != "done":
         raise HTTPException(400, "任务尚未完成")
     candidates: list[str] = []
-    for key in ("file_path", "cover_path", "audio_path", "danmaku_path"):
+    for key in ("file_path", "cover_path", "audio_path", "danmaku_path", "subtitle_path"):
         candidates.append(v.get(key) or "")
     candidates += json.loads(v.get("images") or "[]")
     if v.get("file_path"):
@@ -429,8 +530,8 @@ def history_zip(vid: int):
 def _row_public(r: dict, full: bool = False) -> dict:
     keys = ["id", "platform", "video_id", "title", "description", "author",
             "cover_url", "cover_path", "duration", "publish_time", "quality",
-            "file_path", "file_size", "audio_path", "danmaku_path", "images",
-            "status", "progress", "error", "created_at", "downloaded_at",
+            "file_path", "file_size", "audio_path", "danmaku_path", "subtitle_path",
+            "images", "status", "progress", "error", "created_at", "downloaded_at",
             "favorite"]
     out = {k: r.get(k, "") for k in keys}
     out["stats"] = json.loads(r.get("stats") or "{}")
@@ -461,12 +562,12 @@ MIME = {".mp4": "video/mp4", ".mkv": "video/x-matroska", ".webm": "video/webm",
 
 @app.get("/api/file")
 def serve_file(request: Request, id: int, type: str = "video", index: int = 0,
-               download: int = 0):
+               download: int = 0, user: dict = Depends(current_user)):
     """按记录 ID 输出已下载文件。路径取自数据库而非用户输入，杜绝目录遍历。
 
     download=1 时带 Content-Disposition 附件头，浏览器直接保存到本机。
     """
-    v = database.get_video(id)
+    v = _own_video(id, user)
     if not v:
         raise HTTPException(404, "记录不存在")
     if type == "image":
@@ -476,6 +577,8 @@ def serve_file(request: Request, id: int, type: str = "video", index: int = 0,
         path = Path(images[index])
     elif type == "audio":
         path = Path(v.get("audio_path") or "")
+    elif type == "subtitle":
+        path = Path(v.get("subtitle_path") or "")
     elif type == "cover":
         path = Path(v.get("cover_path") or "")
     else:
@@ -546,7 +649,7 @@ SENSITIVE = ("bilibili_cookie", "douyin_cookie", "kuaishou_cookie",
 
 
 @app.get("/api/config")
-def get_config():
+def get_config(user: dict = Depends(admin_only)):
     cfg = config.all_settings()
     for k in SENSITIVE:
         cfg[k] = "__SET__" if cfg.get(k) else ""
@@ -556,7 +659,7 @@ def get_config():
 
 
 @app.post("/api/config")
-async def set_config(req: Request):
+async def set_config(req: Request, user: dict = Depends(admin_only)):
     body = await req.json()
     patch = {}
     for k, v in body.items():
@@ -565,12 +668,6 @@ async def set_config(req: Request):
         if v == "__KEEP__":
             continue
         patch[k] = v
-    # 管理密钥防篡改：已设置密钥时，修改必须提供当前密钥（防止访客改掉密钥看统计）
-    if "admin_key" in patch and config.get("admin_key", ""):
-        supplied = (body.get("current_admin_key") or
-                    req.headers.get("x-admin-key") or "")
-        if supplied != config.get("admin_key"):
-            raise HTTPException(403, "修改管理密钥需要提供当前密钥")
     cfg = config.update(patch)
     if "subscription_interval" in patch:
         scheduler.sub_scheduler.restart()
@@ -580,13 +677,13 @@ async def set_config(req: Request):
 
 
 @app.get("/api/config/dirs")
-def get_dirs():
+def get_dirs(user: dict = Depends(current_user)):
     return {"current": config.get("download_dir"),
             "recent": config.get("recent_dirs", [])}
 
 
 @app.post("/api/config/dirs")
-async def set_dir(req: Request):
+async def set_dir(req: Request, user: dict = Depends(admin_only)):
     body = await req.json()
     d = (body.get("dir") or "").strip()
     if not d:
@@ -601,12 +698,12 @@ async def set_dir(req: Request):
 # ---------------- 订阅 ----------------
 
 @app.get("/api/subscriptions")
-def list_subs():
-    return {"items": database.list_subs()}
+def list_subs(user: dict = Depends(current_user)):
+    return {"items": database.list_subs(user["id"])}
 
 
 @app.post("/api/subscriptions")
-async def add_sub(req: Request):
+async def add_sub(req: Request, user: dict = Depends(current_user)):
     body = await req.json()
     url = (body.get("url") or "").strip()
     if not url:
@@ -627,18 +724,25 @@ async def add_sub(req: Request):
         "uploader_name": info["name"], "avatar_url": info["avatar"],
         "source_url": url, "enabled": 1,
         "options": json.dumps(options, ensure_ascii=False),
-    })
+    }, user_id=user["id"])
     if not sid:
         raise HTTPException(409, "该博主已在订阅列表中")
     return {"ok": True, "id": sid}
 
 
-@app.patch("/api/subscriptions/{sid}")
-async def patch_sub(sid: int, req: Request):
-    body = await req.json()
+def _own_sub(sid: int, user: dict) -> dict:
     sub = database.get_sub(sid)
     if not sub:
         raise HTTPException(404, "订阅不存在")
+    if sub.get("user_id") != user["id"]:
+        raise HTTPException(403, "无权操作该订阅")
+    return sub
+
+
+@app.patch("/api/subscriptions/{sid}")
+async def patch_sub(sid: int, req: Request, user: dict = Depends(current_user)):
+    sub = _own_sub(sid, user)
+    body = await req.json()
     fields = {}
     if "enabled" in body:
         fields["enabled"] = 1 if body["enabled"] else 0
@@ -653,16 +757,15 @@ async def patch_sub(sid: int, req: Request):
 
 
 @app.delete("/api/subscriptions/{sid}")
-def del_sub(sid: int):
+def del_sub(sid: int, user: dict = Depends(current_user)):
+    _own_sub(sid, user)
     database.delete_sub(sid)
     return {"ok": True}
 
 
 @app.post("/api/subscriptions/{sid}/check")
-def check_sub(sid: int):
-    sub = database.get_sub(sid)
-    if not sub:
-        raise HTTPException(404, "订阅不存在")
+def check_sub(sid: int, user: dict = Depends(current_user)):
+    sub = _own_sub(sid, user)
     try:
         n = scheduler.check_subscription(sub)
     except Exception as e:
@@ -673,7 +776,7 @@ def check_sub(sid: int):
 # ---------------- 工具箱 ----------------
 
 @app.get("/api/toolbox/tools")
-def toolbox_tools():
+def toolbox_tools(user: dict = Depends(current_user)):
     return {"tools": toolbox.TOOLS,
             "video_tools": sorted(toolbox.VIDEO_TOOLS),
             "image_tools": sorted(toolbox.IMAGE_TOOLS),
@@ -681,7 +784,7 @@ def toolbox_tools():
 
 
 @app.post("/api/toolbox/upload")
-async def toolbox_upload(file: UploadFile):
+async def toolbox_upload(file: UploadFile, user: dict = Depends(current_user)):
     data = await file.read()
     if len(data) > 500 * 1024 * 1024:
         raise HTTPException(400, "文件超过 500MB 限制")
@@ -692,9 +795,10 @@ async def toolbox_upload(file: UploadFile):
 
 
 @app.get("/api/toolbox/sources")
-def toolbox_sources(keyword: str = ""):
-    """片库中可作为工具素材的记录：已完成视频 + 图集。"""
-    rows, _ = database.history(status="done", keyword=keyword, page=1, size=50)
+def toolbox_sources(keyword: str = "", user: dict = Depends(current_user)):
+    """片库中可作为工具素材的记录：本人已完成视频 + 图集。"""
+    rows, _ = database.history(status="done", keyword=keyword, page=1, size=50,
+                               user_id=user["id"])
     items = []
     for r in rows:
         images = json.loads(r.get("images") or "[]")
@@ -711,7 +815,7 @@ def toolbox_sources(keyword: str = ""):
 
 
 @app.post("/api/toolbox/jobs")
-async def toolbox_create(req: Request):
+async def toolbox_create(req: Request, user: dict = Depends(current_user)):
     body = await req.json()
     kind = body.get("kind") or ""
     video_id = int(body.get("video_id") or 0)
@@ -720,15 +824,16 @@ async def toolbox_create(req: Request):
         raise HTTPException(400, "请先选择素材")
     src = f"video:{video_id}" if video_id else f"upload:{upload}"
     try:
-        jid = toolbox.tool_manager.create(kind, src, body.get("params") or {})
+        jid = toolbox.tool_manager.create(kind, src, body.get("params") or {},
+                                          user_id=user["id"])
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"ok": True, "id": jid}
 
 
 @app.get("/api/toolbox/jobs")
-def toolbox_jobs():
-    rows = database.list_tool_jobs(50)
+def toolbox_jobs(user: dict = Depends(current_user)):
+    rows = database.list_tool_jobs(user["id"], 50)
     return {"items": [{
         "id": r["id"], "kind": r["kind"], "src": r["src"],
         "status": r["status"], "progress": r["progress"],
@@ -740,9 +845,9 @@ def toolbox_jobs():
 
 
 @app.get("/api/toolbox/jobs/{jid}/file")
-def toolbox_file(jid: int, index: int = 0):
+def toolbox_file(jid: int, index: int = 0, user: dict = Depends(current_user)):
     job = database.get_tool_job(jid)
-    if not job or job["status"] != "done":
+    if not job or job["status"] != "done" or job.get("user_id") != user["id"]:
         raise HTTPException(404, "产物不存在")
     outs = json.loads(job.get("extra") or "[]") or ([job["out_path"]] if job["out_path"] else [])
     if index >= len(outs):
@@ -754,10 +859,11 @@ def toolbox_file(jid: int, index: int = 0):
 
 
 @app.delete("/api/toolbox/jobs/{jid}")
-def toolbox_delete(jid: int, keep_files: bool = True):
-    job = database.delete_tool_job(jid)
-    if not job:
+def toolbox_delete(jid: int, keep_files: bool = True, user: dict = Depends(current_user)):
+    job = database.get_tool_job(jid)
+    if not job or job.get("user_id") != user["id"]:
         raise HTTPException(404, "任务不存在")
+    database.delete_tool_job(jid)
     if not keep_files:
         for p in json.loads(job.get("extra") or "[]") or [job.get("out_path") or ""]:
             if p and Path(p).exists():
@@ -768,17 +874,17 @@ def toolbox_delete(jid: int, keep_files: bool = True):
 # ---------------- 通知中心 ----------------
 
 @app.get("/api/notifications")
-def notifications(limit: int = 50):
-    return {"items": database.list_notifications(limit),
-            "unread": database.unread_count()}
+def notifications(limit: int = 50, user: dict = Depends(current_user)):
+    return {"items": database.list_notifications(user["id"], limit),
+            "unread": database.unread_count(user["id"])}
 
 
 @app.post("/api/notifications/read")
-async def notifications_read(req: Request):
+async def notifications_read(req: Request, user: dict = Depends(current_user)):
     body = await req.json()
     ids = body.get("ids")
     n = database.mark_notifications_read(
-        [int(x) for x in ids] if isinstance(ids, list) else None)
+        user["id"], [int(x) for x in ids] if isinstance(ids, list) else None)
     return {"ok": True, "marked": n}
 
 
@@ -791,7 +897,7 @@ def _app_exe_path() -> Path:
 
 
 @app.get("/api/app/status")
-def app_status():
+def app_status(user: dict = Depends(current_user)):
     p = _app_exe_path()
     if p.exists():
         st = p.stat()
@@ -801,7 +907,7 @@ def app_status():
 
 
 @app.get("/api/app/download")
-def app_download():
+def app_download(user: dict = Depends(current_user)):
     p = _app_exe_path()
     if not p.exists():
         raise HTTPException(404, "客户端文件未上传")
@@ -809,41 +915,83 @@ def app_download():
                         media_type="application/octet-stream")
 
 
-# ---------------- 管理面板：统计（仅密钥持有者可见） ----------------
+# ---------------- 备份 / 恢复（admin） ----------------
 
-def _require_admin(request: Request) -> None:
-    key = config.get("admin_key", "")
-    if not key:
-        raise HTTPException(403, "未配置管理密钥（设置页 → 管理面板）")
-    if request.headers.get("x-admin-key", "") != key:
-        raise HTTPException(403, "密钥错误")
+@app.get("/api/backup/download")
+def backup_download(user: dict = Depends(admin_only)):
+    """打包 config.json + metadata.db + 版本信息，供下载保存。"""
+    import sqlite3 as _sqlite3
+    tmp_dir = database.DB_PATH.parent / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(suffix=".zip", dir=str(tmp_dir))
+    os.close(fd)
+    try:
+        # sqlite backup API 做一致性快照
+        snap = Path(str(tmp) + ".db")
+        src = _sqlite3.connect(str(database.DB_PATH))
+        dst = _sqlite3.connect(str(snap))
+        with dst:
+            src.backup(dst)
+        dst.close(); src.close()
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(snap, "metadata.db")
+            if config.CONFIG_PATH.exists():
+                zf.write(config.CONFIG_PATH, "config.json")
+            zf.writestr("version.txt", f"PacDown v1.3 备份\n时间: {datetime.now()}")
+        _silent_unlink(str(snap))
+    except Exception:
+        _silent_unlink(tmp)
+        raise HTTPException(500, "备份打包失败")
+    return FileResponse(tmp, filename="pacdown-backup.zip",
+                        media_type="application/zip",
+                        background=BackgroundTask(_silent_unlink, tmp))
 
 
-@app.get("/api/stats/configured")
-def stats_configured():
-    return {"configured": bool(config.get("admin_key", ""))}
+@app.post("/api/backup/restore")
+async def backup_restore(file: UploadFile, user: dict = Depends(admin_only)):
+    """上传备份 zip 恢复数据库与配置（解压到临时文件→backup 覆盖，立即生效）。"""
+    data = await file.read()
+    if len(data) > 200 * 1024 * 1024:
+        raise HTTPException(400, "备份文件过大")
+    fd, tmp = tempfile.mkstemp(suffix=".zip")
+    os.close(fd)
+    try:
+        Path(tmp).write_bytes(data)
+        tmp_dir = database.DB_PATH.parent / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(tmp) as zf:
+            names = zf.namelist()
+            if "metadata.db" not in names:
+                raise HTTPException(400, "备份文件缺少 metadata.db")
+            # 解压到独立临时文件（绝不能直接覆盖在用的 metadata.db）
+            tmp_db = tmp_dir / f"restore-{os.getpid()}-{os.urandom(4).hex()}.db"
+            with zf.open("metadata.db") as fsrc, open(tmp_db, "wb") as fdst:
+                fdst.write(fsrc.read())
+            database.restore_from_backup(str(tmp_db))
+            tmp_db.unlink(missing_ok=True)
+            if "config.json" in names:
+                with zf.open("config.json") as fsrc:
+                    cfg_text = fsrc.read().decode("utf-8")
+                config.CONFIG_PATH.write_text(cfg_text, encoding="utf-8")
+                config.load()  # 立即重载配置
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"恢复失败：{str(e)[:150]}")
+    finally:
+        _silent_unlink(tmp)
+    return {"ok": True, "message": "已恢复，立即生效（无需重启）"}
 
 
-@app.post("/api/stats/auth")
-async def stats_auth(req: Request):
-    body = await req.json()
-    key = config.get("admin_key", "")
-    if not key:
-        raise HTTPException(403, "未配置管理密钥（设置页 → 管理面板）")
-    if (body.get("key") or "") != key:
-        raise HTTPException(403, "密钥错误")
-    return {"ok": True}
-
+# ---------------- 管理面板：统计（仅 admin 可见） ----------------
 
 @app.get("/api/stats/visits")
-def stats_visits(request: Request, days: int = 30):
-    _require_admin(request)
+def stats_visits(request: Request, days: int = 30, user: dict = Depends(admin_only)):
     return database.visit_stats(min(max(days, 1), 90))
 
 
 @app.get("/api/stats/downloads")
-def stats_downloads(request: Request, days: int = 30):
-    _require_admin(request)
+def stats_downloads(request: Request, days: int = 30, user: dict = Depends(admin_only)):
     days = min(max(days, 1), 90)
     by_day = database.query(
         "SELECT date(downloaded_at) AS d, COUNT(*) AS n, COALESCE(SUM(file_size),0) AS size "
@@ -894,12 +1042,12 @@ RULE_ACTION_KINDS = ("mp3", "transcode", "compress", "gif")
 
 
 @app.get("/api/rules")
-def list_rules():
-    return {"items": database.list_rules()}
+def list_rules(user: dict = Depends(current_user)):
+    return {"items": database.list_rules(user["id"])}
 
 
 @app.post("/api/rules")
-async def create_rule(req: Request):
+async def create_rule(req: Request, user: dict = Depends(current_user)):
     body = await req.json()
     match_type = body.get("match_type") or "all"
     if match_type not in RULE_MATCH_TYPES:
@@ -920,15 +1068,23 @@ async def create_rule(req: Request):
         "match_value": (body.get("match_value") or "").strip()[:120],
         "actions": json.dumps(clean, ensure_ascii=False),
         "enabled": 1,
-    })
+    }, user_id=user["id"])
     return {"ok": True, "id": rid}
 
 
-@app.patch("/api/rules/{rid}")
-async def patch_rule(rid: int, req: Request):
-    body = await req.json()
-    if not database.get_rule(rid):
+def _own_rule(rid: int, user: dict) -> dict:
+    r = database.get_rule(rid)
+    if not r:
         raise HTTPException(404, "规则不存在")
+    if r.get("user_id") != user["id"]:
+        raise HTTPException(403, "无权操作该规则")
+    return r
+
+
+@app.patch("/api/rules/{rid}")
+async def patch_rule(rid: int, req: Request, user: dict = Depends(current_user)):
+    _own_rule(rid, user)
+    body = await req.json()
     fields = {}
     if "enabled" in body:
         fields["enabled"] = 1 if body["enabled"] else 0
@@ -940,7 +1096,8 @@ async def patch_rule(rid: int, req: Request):
 
 
 @app.delete("/api/rules/{rid}")
-def del_rule(rid: int):
+def del_rule(rid: int, user: dict = Depends(current_user)):
+    _own_rule(rid, user)
     database.delete_rule(rid)
     return {"ok": True}
 
@@ -948,15 +1105,16 @@ def del_rule(rid: int):
 # ---------------- 搬运工作台 ----------------
 
 @app.get("/api/repost/status")
-def repost_status():
+def repost_status(user: dict = Depends(current_user)):
     from . import ai
     return {"ai_ready": ai.ai_ready(),
             "model": config.get("ai_model") or ai.DEFAULT_MODEL}
 
 
 @app.get("/api/repost/videos")
-def repost_videos(keyword: str = "", limit: int = 50):
-    rows, _ = database.history(status="done", keyword=keyword, page=1, size=limit)
+def repost_videos(keyword: str = "", limit: int = 50, user: dict = Depends(current_user)):
+    rows, _ = database.history(status="done", keyword=keyword, page=1, size=limit,
+                               user_id=user["id"])
     return {"items": [{"id": r["id"], "title": r["title"], "author": r["author"],
                        "platform": r["platform"], "file_path": r["file_path"],
                        "description": r.get("description") or "",
@@ -964,11 +1122,11 @@ def repost_videos(keyword: str = "", limit: int = 50):
 
 
 @app.post("/api/repost/generate")
-async def repost_generate(req: Request):
+async def repost_generate(req: Request, user: dict = Depends(current_user)):
     from . import ai
     body = await req.json()
     vid = body.get("video_id")
-    v = database.get_video(vid) if vid else None
+    v = _own_video(vid, user) if vid else None
     if not v:
         raise HTTPException(404, "视频不存在")
     try:
@@ -983,23 +1141,24 @@ async def repost_generate(req: Request):
         "credit": 1 if body.get("credit", True) else 0,
         "new_title": result["title"], "new_desc": result["description"],
         "tags": json.dumps(result["tags"], ensure_ascii=False),
-    })
+    }, user_id=user["id"])
     return {"id": rid, "video_id": vid, **result}
 
 
 @app.get("/api/repost/list")
-def repost_list(video_id: int | None = None):
-    rows = database.list_reposts(video_id)
+def repost_list(video_id: int | None = None, user: dict = Depends(current_user)):
+    rows = database.list_reposts(video_id, user["id"])
     for r in rows:
         r["tags"] = json.loads(r.get("tags") or "[]")
     return {"items": rows}
 
 
 @app.post("/api/repost/{rid}/save")
-async def repost_save(rid: int, req: Request):
+async def repost_save(rid: int, req: Request, user: dict = Depends(current_user)):
     """用户手动编辑后的文案保存回历史记录。"""
     body = await req.json()
-    row = database.query_one("SELECT * FROM reposts WHERE id=?", (rid,))
+    row = database.query_one("SELECT * FROM reposts WHERE id=? AND user_id=?",
+                             (rid, user["id"]))
     if not row:
         raise HTTPException(404, "记录不存在")
     database.execute(

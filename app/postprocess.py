@@ -172,3 +172,68 @@ def download_danmaku(cid: int, dest: str) -> str:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
     return str(out.resolve())
+
+
+# ---------------- B站 CC 字幕 ----------------
+
+def fetch_bilibili_subtitle(bvid: str, cid: int) -> str | None:
+    """拉取B站 CC 字幕并转为 SRT 文本；无字幕返回 None。
+
+    走 player/v2 接口（免签名，2026-08 实测可用），取首条可用字幕轨。
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126",
+        "Referer": "https://www.bilibili.com/",
+    }
+    cookie = config.get("bilibili_cookie", "")
+    if cookie:
+        headers["Cookie"] = cookie
+    with httpx.Client(timeout=15, proxy=config.get("http_proxy") or None) as c:
+        r = c.get(f"https://api.bilibili.com/x/player/v2?cid={cid}&bvid={bvid}",
+                  headers=headers)
+        r.raise_for_status()
+        data = r.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"字幕接口返回 code={data.get('code')}")
+    subs = ((data.get("data") or {}).get("subtitle") or {}).get("subtitles") or []
+    if not subs:
+        return None
+    # 优先级：AI 中文 > 中文字幕 > 第一条
+    def score(s):
+        lan = (s.get("lan") or "").lower()
+        if lan.startswith("ai-") or "zh" in lan:
+            return 0 if lan.startswith("ai") else 1
+        return 2
+    best = min(subs, key=score)
+    url = best.get("subtitle_url") or ""
+    if not url.startswith("http"):
+        url = "https:" + url
+    with httpx.Client(timeout=15, proxy=config.get("http_proxy") or None) as c:
+        r = c.get(url, headers=headers)
+        r.raise_for_status()
+        body = (r.json().get("body") or [])
+    if not body:
+        return None
+    return _srt_from_body(body)
+
+
+def _srt_from_body(body: list[dict]) -> str:
+    """字幕 JSON body → SRT 文本。"""
+    out = []
+    for i, it in enumerate(body, 1):
+        start = float(it.get("from") or 0)
+        end = float(it.get("to") or start + 1)
+        text = (it.get("content") or "").strip().replace("\n", " ")
+        if not text:
+            continue
+        out.append(f"{i}\n{_srt_ts(start)} --> {_srt_ts(end)}\n{text}\n")
+    return "\n".join(out)
+
+
+def _srt_ts(sec: float) -> str:
+    sec = max(0, sec)
+    ms = int(round((sec - int(sec)) * 1000))
+    s = int(sec) % 60
+    m = (int(sec) // 60) % 60
+    h = int(sec) // 3600
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"

@@ -83,6 +83,10 @@
         <span>赞赏</span>
       </button>
     </div>
+    <button class="user-chip" id="user-chip" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/></svg>
+      <span id="user-name"></span>
+    </button>
     <button class="theme-toggle" id="theme-toggle" title="切换明暗主题">
       <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4l1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
       <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
@@ -121,6 +125,7 @@
         <div class="quick-opts">
           <label class="opt-chip" title="需要本机安装 ffmpeg"><input type="checkbox" id="opt-audio"><span>提取 MP3</span></label>
           <label class="opt-chip" title="仅 B站视频，保存为 XML 弹幕"><input type="checkbox" id="opt-danmaku"><span>下载弹幕</span></label>
+          <label class="opt-chip" title="仅 B站视频，保存 CC 字幕（SRT）"><input type="checkbox" id="opt-subtitle"><span>下载字幕</span></label>
           <label class="opt-chip" title="B站抓取热评 / 抖音抓取评论（免登录），保存在详情与 JSON 中"><input type="checkbox" id="opt-comments"><span>抓取评论</span></label>
         </div>
       </div>
@@ -580,6 +585,14 @@
           <p>需要安装 <a href="https://ffmpeg.org/download.html" target="_blank" rel="noopener">ffmpeg</a> 并加入 PATH；Windows 独立版与 Docker 版已内置。</p>
         </details>
       </div>
+
+      <!-- 赞赏位 -->
+      <div class="glass guide-sec guide-donate">
+        <h2>如果帮到了你 ☕</h2>
+        <p>PacDown 完全免费开源地为你服务——如果它省下了你的时间，可以扫码请作者喝杯咖啡，支持继续更新。</p>
+        <img src="/static/assets/donate-qr.png" alt="微信赞赏码" loading="lazy"
+             onclick="openLightbox([{type:'image',src:this.src,caption:'微信收款码 · 点击放大'}],0)" title="点击放大">
+      </div>
     </div>
   </section>
 
@@ -710,6 +723,45 @@
         </div>
         <div id="rule-list" class="rule-list"></div>
       </form>
+      <form class="glass setting-group" id="form-account">
+        <h3>账号 <span class="tag" id="account-role-tag"></span></h3>
+        <div class="field">
+          <label>当前账号</label>
+          <div class="account-line"><b id="account-name"></b>
+            <button class="btn btn-ghost btn-sm" id="btn-logout" type="button">退出登录</button>
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label>原密码</label>
+            <input type="password" id="set-old-pwd" autocomplete="current-password">
+          </div>
+          <div class="field">
+            <label>新密码</label>
+            <input type="password" id="set-new-pwd" autocomplete="new-password">
+          </div>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="btn-change-pwd" type="button">修改密码</button>
+        <div class="field" style="margin-top:14px" id="reg-toggle-wrap" hidden>
+          <label>开放注册</label>
+          <label class="opt-chip"><input type="checkbox" id="set-allow-register"><span>允许新用户自助注册</span></label>
+          <p class="hint">仅管理员可见；关闭后新访客无法注册账号</p>
+        </div>
+      </form>
+      <form class="glass setting-group" id="form-backup">
+        <h3>数据 <span class="tag">备份与恢复</span></h3>
+        <div class="field">
+          <label>一键备份</label>
+          <p class="hint">打包数据库与配置（不含已下载的视频文件）</p>
+          <button class="btn btn-primary btn-sm" id="btn-backup" type="button">下载备份</button>
+        </div>
+        <div class="field" style="margin-top:12px">
+          <label>恢复备份</label>
+          <p class="hint">上传备份 zip 后需重启服务生效；恢复前当前库自动存为 .bak</p>
+          <input type="file" id="backup-file" accept=".zip" hidden>
+          <button class="btn btn-ghost btn-sm" id="btn-restore" type="button">选择备份文件恢复</button>
+        </div>
+      </form>
       <form class="glass setting-group" id="form-ai">
         <h3>AI 文案 <span class="tag">搬运工作台</span></h3>
         <div class="field">
@@ -749,6 +801,30 @@
 </div>
 
 <div id="toast-root"></div>
+
+<!-- 登录 / 注册 -->
+<div class="auth-mask" id="auth-mask" hidden>
+  <div class="auth-card glass-strong">
+    <div class="auth-logo">
+      <span class="logo-mark">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg>
+      </span>
+      <span class="auth-title">Pac<em>Down</em></span>
+    </div>
+    <p class="auth-sub">粘贴链接 · 无水印下载 · 你的私人片库</p>
+    <div class="auth-tabs">
+      <button class="auth-tab active" id="tab-login">登录</button>
+      <button class="auth-tab" id="tab-register">注册</button>
+    </div>
+    <div class="auth-form">
+      <input id="auth-username" placeholder="用户名" autocomplete="username" maxlength="20">
+      <input id="auth-password" type="password" placeholder="密码（至少 6 位）" autocomplete="current-password">
+      <div class="auth-err" id="auth-err" hidden></div>
+      <button class="btn btn-primary auth-btn" id="btn-auth">登 录</button>
+    </div>
+    <p class="auth-hint" id="auth-hint" hidden>注册已关闭，请联系管理员创建账号</p>
+  </div>
+</div>
 
 <!-- 赞赏弹窗 -->
 <div class="modal-mask" id="donate-modal" hidden>

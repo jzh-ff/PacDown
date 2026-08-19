@@ -44,12 +44,145 @@ async function api(path, opts = {}) {
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
+  if (r.status === 401) {
+    showAuth();  // 会话失效 → 回到登录
+    throw new Error("请先登录");
+  }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || `请求失败 (${r.status})`);
   return data;
 }
 
-function toast(msg, type = "ok", ms = 3400) {
+/* ---------- 认证 ---------- */
+
+let me = null;             // {id, username, role}
+let allowRegister = true;
+
+function isAdmin() { return me?.role === "admin"; }
+
+async function fetchMe() {
+  try {
+    const d = await fetch("/api/auth/me").then((r) => r.json());
+    me = d.user;
+    allowRegister = d.allow_register !== false;
+    return me;
+  } catch (e) { me = null; return null; }
+}
+
+function showAuth() {
+  me = null;
+  $("#auth-mask").hidden = false;
+  $(".sidebar").style.visibility = "hidden";
+  $(".main").style.visibility = "hidden";
+  $("#auth-err").hidden = true;
+}
+
+function hideAuth() {
+  $("#auth-mask").hidden = true;
+  $(".sidebar").style.visibility = "";
+  $(".main").style.visibility = "";
+  applyRoleNav();
+  const chip = $("#user-chip");
+  chip.hidden = false;
+  $("#user-name").textContent = me?.username || "";
+}
+
+function applyRoleNav() {
+  // 设置 / 统计 仅 admin
+  const isAdminUser = isAdmin();
+  const settingsBtn = document.querySelector('.nav-item[data-page="settings"]');
+  if (settingsBtn) settingsBtn.hidden = !isAdminUser;
+  $("#nav-stats").hidden = !isAdminUser;
+}
+
+let authTab = "login";
+$("#tab-login").addEventListener("click", () => setAuthTab("login"));
+$("#tab-register").addEventListener("click", () => setAuthTab("register"));
+
+function setAuthTab(t) {
+  authTab = t;
+  $("#tab-login").classList.toggle("active", t === "login");
+  $("#tab-register").classList.toggle("active", t === "register");
+  $("#btn-auth").textContent = t === "login" ? "登 录" : "注 册";
+  $("#auth-hint").hidden = t === "login" || allowRegister;
+  $("#auth-err").hidden = true;
+}
+
+$("#btn-auth").addEventListener("click", async () => {
+  const username = $("#auth-username").value.trim();
+  const password = $("#auth-password").value;
+  const err = $("#auth-err");
+  if (!username || !password) {
+    err.textContent = "请输入用户名和密码"; err.hidden = false; return;
+  }
+  const btn = $("#btn-auth");
+  btn.disabled = true;
+  try {
+    const path = authTab === "login" ? "/api/auth/login" : "/api/auth/register";
+    const r = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      err.textContent = data.detail || "操作失败"; err.hidden = false; return;
+    }
+    me = data.user;
+    hideAuth();
+    if (authTab === "register" && me?.role === "admin") {
+      toast(me.role === "admin" ? "注册成功，你已成为管理员（旧数据已并入你的账号）" : "注册成功");
+    } else {
+      toast(`欢迎回来，${me?.username || ""}`);
+    }
+    boot();
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$("#auth-username").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#btn-auth").click(); });
+$("#auth-password").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#btn-auth").click(); });
+
+$("#btn-logout").addEventListener("click", async () => {
+  await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+  showAuth();
+});
+
+$("#btn-change-pwd").addEventListener("click", async () => {
+  const oldPwd = $("#set-old-pwd").value;
+  const newPwd = $("#set-new-pwd").value;
+  if (!oldPwd || !newPwd) { toast("请填写原密码与新密码", "warn"); return; }
+  try {
+    await api("/api/auth/password", { method: "POST", body: { old_password: oldPwd, new_password: newPwd } });
+    toast("密码已修改");
+    $("#set-old-pwd").value = ""; $("#set-new-pwd").value = "";
+  } catch (e) { toast(e.message, "err"); }
+});
+
+/* ---------- 备份 / 恢复（admin） ---------- */
+
+$("#btn-backup").addEventListener("click", () => {
+  window.location.href = "/api/backup/download";
+});
+
+$("#btn-restore").addEventListener("click", () => $("#backup-file").click());
+$("#backup-file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (!confirm("恢复将覆盖当前数据库与配置，确认继续？")) { e.target.value = ""; return; }
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const r = await fetch("/api/backup/restore", { method: "POST", body: fd });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || "恢复失败");
+    toast(data.message || "恢复成功", "ok", 6000);
+    e.target.value = "";
+  } catch (err) { toast(err.message, "err"); }
+});
+
+function toast(msg, type = "ok", ms = 3400, action = null) {
   const icons = {
     ok: '<svg class="t-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5l5 5L20 7"/></svg>',
     err: '<svg class="t-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
@@ -57,7 +190,15 @@ function toast(msg, type = "ok", ms = 3400) {
   };
   const el = document.createElement("div");
   el.className = `toast ${type}`;
-  el.innerHTML = `${icons[type] || icons.ok}<div>${esc(msg)}</div>`;
+  el.innerHTML = `${icons[type] || icons.ok}<div class="t-body">${esc(msg)}</div>` +
+    (action ? `<button class="t-action">${esc(action.label)}</button>` : "");
+  if (action) {
+    el.querySelector(".t-action").addEventListener("click", () => {
+      el.classList.add("out");
+      setTimeout(() => el.remove(), 320);
+      action.onClick();
+    });
+  }
   $("#toast-root").appendChild(el);
   setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 320); }, ms);
 }
@@ -340,6 +481,7 @@ $("#btn-download-selected").addEventListener("click", async () => {
     quality: "best",
     extract_audio: $("#opt-audio").checked,
     download_danmaku: $("#opt-danmaku").checked,
+    download_subtitle: $("#opt-subtitle").checked,
     fetch_comments: $("#opt-comments").checked,
   };
   const btn = $("#btn-download-selected");
@@ -423,7 +565,10 @@ function updateTaskEl(el, t, fresh = false) {
 
   if (t.status === "done" && !doneNotified.has(t.id)) {
     doneNotified.add(t.id);
-    toast(`《${(t.title || "视频").slice(0, 30)}》下载完成`, "ok");
+    toast(`《${(t.title || "视频").slice(0, 30)}》下载完成`, "ok", 5200, {
+      label: "好用？支持作者 ☕",
+      onClick: () => { $("#donate-modal").hidden = false; },
+    });
     if ($("#page-history").classList.contains("active")) loadHistory(true);
   }
   // duplicate 提示：8 秒后自动清理
@@ -912,8 +1057,19 @@ window.openDetail = async (id) => {
       <button class="modal-close" onclick="closeModal()">✕</button>
       ${preview}
       <div class="modal-title-row">
-        <h3>${esc(v.title || "(无标题)")}</h3>
+        <h3 id="detail-title">${esc(v.title || "(无标题)")}</h3>
         <button class="fav-btn ${v.favorite ? "on" : ""}" id="detail-fav" title="收藏 / 取消收藏">★</button>
+        <button class="btn btn-ghost btn-sm" id="btn-edit-meta" onclick="toggleEditMeta()">编辑</button>
+      </div>
+      <div id="detail-edit" hidden>
+        <div class="field"><label>标题</label><input id="edit-title"></div>
+        <div class="field"><label>作者</label><input id="edit-author"></div>
+        <div class="field"><label>描述</label><textarea id="edit-desc" rows="3"></textarea></div>
+        <p class="hint">仅修改库内元数据，磁盘文件名不变</p>
+        <div class="gen-actions">
+          <button class="btn btn-primary btn-sm" onclick="saveEditMeta()">保存</button>
+          <button class="btn btn-ghost btn-sm" onclick="toggleEditMeta()">取消</button>
+        </div>
       </div>
       <div class="h-meta" style="margin-top:8px">${badge(v.platform)}<span>${esc(v.author)}</span>${statusBadge(v.status)}</div>
       <div class="detail-tags" id="detail-tags"></div>
@@ -924,6 +1080,7 @@ window.openDetail = async (id) => {
         ${kv("文件大小", fmtSize(v.file_size))}
         ${kv("下载时间", v.downloaded_at)}
         ${v.danmaku_path ? kv("弹幕", "已保存 XML") : ""}
+        ${v.subtitle_path ? kv("字幕", "已保存 SRT") : ""}
         ${images.length ? kv("图集", images.length + " 张") : ""}
         ${stats}
       </div>
@@ -942,6 +1099,7 @@ window.openDetail = async (id) => {
         <pre>${esc(JSON.stringify(v.raw, null, 2))}</pre></details>
     `;
     detailVid = v.id;
+    editMetaVid = v.id;
     detailTags = [...(v.tags || [])];
     renderDetailTags();
     $("#detail-fav").addEventListener("click", async (e) => {
@@ -952,7 +1110,37 @@ window.openDetail = async (id) => {
         loadHistory(true);
       } catch (err) { toast(err.message, "err"); }
     });
+    $("#edit-title").value = v.title || "";
+    $("#edit-author").value = v.author || "";
+    $("#edit-desc").value = v.description || "";
+    $("#detail-edit").hidden = true;
+    $("#btn-edit-meta").textContent = "编辑";
     $("#modal").hidden = false;
+  } catch (e) { toast(e.message, "err"); }
+};
+
+/* 详情弹窗元数据编辑 */
+let editMetaVid = 0;
+window.toggleEditMeta = () => {
+  const box = $("#detail-edit");
+  box.hidden = !box.hidden;
+  $("#btn-edit-meta").textContent = box.hidden ? "编辑" : "收起";
+};
+
+window.saveEditMeta = async () => {
+  try {
+    await api(`/api/history/${editMetaVid}`, {
+      method: "PATCH",
+      body: {
+        title: $("#edit-title").value.trim(),
+        author: $("#edit-author").value.trim(),
+        description: $("#edit-desc").value.trim(),
+      },
+    });
+    toast("已保存");
+    toggleEditMeta();
+    openDetail(editMetaVid);   // 重开刷新显示
+    loadHistory(true);
   } catch (e) { toast(e.message, "err"); }
 };
 
@@ -1383,6 +1571,10 @@ const TOOL_PARAM_DEFS = {
   frame: [
     { k: "at", label: "截取位置", type: "text", def: "20%", ph: "百分比或秒数，如 50% / 12.5" },
   ],
+  danmaku2ass: [],
+  burn_sub: [
+    { k: "hint", label: "字幕文件", type: "text", def: "自动查找同目录 .ass/.srt", ph: "", disabled: true },
+  ],
   img_convert: [
     { k: "format", label: "目标格式", type: "select", def: "webp",
       options: [["webp", "WebP（最小）"], ["jpg", "JPG"], ["png", "PNG"]] },
@@ -1443,13 +1635,13 @@ function renderToolParams() {
   box.innerHTML = defs.map((d) => {
     if (d.type === "select") {
       return `<label class="field-inline">${d.label}
-        <select class="select" data-k="${d.k}">${d.options.map(([v, t]) =>
+        <select class="select" data-k="${d.k}" ${d.disabled ? "disabled" : ""}>${d.options.map(([v, t]) =>
           `<option value="${v}" ${v === d.def ? "selected" : ""}>${t}</option>`).join("")}</select>
       </label>`;
     }
     return `<label class="field-inline">${d.label}
       <input type="${d.type}" data-k="${d.k}" value="${esc(d.def)}" placeholder="${esc(d.ph || "")}"
-             ${d.min != null ? `min="${d.min}"` : ""} ${d.max != null ? `max="${d.max}"` : ""} ${d.step ? `step="${d.step}"` : ""}>
+             ${d.min != null ? `min="${d.min}"` : ""} ${d.max != null ? `max="${d.max}"` : ""} ${d.step ? `step="${d.step}"` : ""} ${d.disabled ? "disabled" : ""}>
     </label>`;
   }).join("");
 }
@@ -1534,7 +1726,7 @@ function updateToolSrcTip() {
 $("#btn-tool-run").addEventListener("click", async () => {
   if (!toolSrc) { toast("请先在左侧选择素材或上传文件", "warn"); return; }
   const params = {};
-  $$("#tool-params [data-k]").forEach((el) => { params[el.dataset.k] = el.value; });
+  $$("#tool-params [data-k]").forEach((el) => { if (!el.disabled) params[el.dataset.k] = el.value; });
   const body = { kind: toolKind, params };
   if (toolSrc.video_id) body.video_id = toolSrc.video_id;
   else body.upload = toolSrc.upload;
@@ -1663,75 +1855,20 @@ $("#notif-read-all").addEventListener("click", async () => {
   pollNotifications();
 });
 
-/* ---------- 管理统计面板（仅站长） ---------- */
-
-let adminKey = localStorage.getItem("pacdown-admin-key") || "";
-let statsUnlocked = false;
-
-async function initStatsNav() {
-  try {
-    const s = await api("/api/stats/configured");
-    $("#nav-stats").hidden = !s.configured;
-    if (s.configured && adminKey) {
-      const r = await fetch("/api/stats/auth", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: adminKey }),
-      });
-      statsUnlocked = r.ok;
-    }
-  } catch (e) { /* 忽略 */ }
-}
+/* ---------- 管理统计面板（仅 admin） ---------- */
 
 async function loadStatsPage() {
-  if (statsUnlocked) {
-    $("#stats-unlock").hidden = true;
-    $("#stats-dashboard").hidden = false;
-    loadAdminStats();
-    return;
-  }
-  $("#stats-unlock").hidden = false;
-  $("#stats-dashboard").hidden = true;
-  $("#stats-key-input").focus();
-}
-
-$("#btn-stats-unlock").addEventListener("click", unlockStats);
-$("#stats-key-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") unlockStats();
-});
-
-async function unlockStats() {
-  const key = $("#stats-key-input").value.trim();
-  if (!key) { toast("请输入管理密钥", "warn"); return; }
-  try {
-    await api("/api/stats/auth", { method: "POST", body: { key } });
-    adminKey = key;
-    localStorage.setItem("pacdown-admin-key", key);
-    statsUnlocked = true;
-    toast("统计面板已解锁");
-    loadStatsPage();
-  } catch (e) {
-    toast(e.message, "err");
-  }
-}
-
-async function adminFetch(path) {
-  const r = await fetch(path, { headers: { "X-Admin-Key": adminKey } });
-  if (r.status === 403) {
-    adminKey = ""; statsUnlocked = false;
-    localStorage.removeItem("pacdown-admin-key");
-    loadStatsPage();
-    throw new Error("密钥已失效，请重新输入");
-  }
-  if (!r.ok) throw new Error(`请求失败 (${r.status})`);
-  return r.json();
+  loadAdminStats();
 }
 
 async function loadAdminStats() {
   try {
     const [visits, dls] = await Promise.all([
-      adminFetch("/api/stats/visits"),
-      adminFetch("/api/stats/downloads"),
+      api("/api/stats/visits"),
+      api("/api/stats/downloads"),
     ]);
+    $("#stats-unlock").hidden = true;
+    $("#stats-dashboard").hidden = false;
     renderAdminStats(visits, dls);
   } catch (e) { toast(e.message, "err"); }
 }
@@ -1739,7 +1876,7 @@ async function loadAdminStats() {
 const DEVICE_NAME = { mobile: "手机", pc: "电脑" };
 const OS_NAME = { windows: "Windows", android: "安卓", ios: "iOS", macos: "macOS", linux: "Linux", other: "其他" };
 const BROWSER_NAME = { wechat: "微信内置", qq: "QQ", chrome: "Chrome", edge: "Edge", safari: "Safari", firefox: "Firefox", douyin: "抖音内嵌", other: "其他" };
-const KIND_CN = { mp3: "提取MP3", transcode: "转码", compress: "压缩", trim: "剪辑", gif: "GIF", watermark: "水印", frame: "截帧", img_convert: "图片转换", img_join: "拼接长图", img_zip: "图集打包" };
+  const KIND_CN = { mp3: "提取MP3", transcode: "转码", compress: "压缩", trim: "剪辑", gif: "GIF", watermark: "水印", frame: "截帧", danmaku2ass: "弹幕转字幕", burn_sub: "字幕压制", img_convert: "图片转换", img_join: "拼接长图", img_zip: "图集打包" };
 
 function maskIp(ip) {
   if (!ip) return "";
@@ -1997,6 +2134,11 @@ async function loadSettings() {
   try {
     const cfg = await api("/api/config");
     loadRules();
+    // 账号区
+    $("#account-name").textContent = me?.username || "";
+    $("#account-role-tag").textContent = isAdmin() ? "管理员" : "普通用户";
+    $("#reg-toggle-wrap").hidden = !isAdmin();
+    $("#set-allow-register").checked = cfg.allow_register !== false;
     $("#set-download-dir").value = cfg.download_dir || "";
     $("#set-concurrency").value = cfg.max_concurrency;
     $("#set-quality").value = cfg.default_quality;
@@ -2030,6 +2172,7 @@ $("#btn-save-settings").addEventListener("click", async () => {
     auto_clean_enabled: $("#set-clean-enabled").checked,
     auto_clean_days: +$("#set-clean-days").value || 30,
     auto_clean_keep_favorite: $("#set-clean-fav").checked,
+    allow_register: $("#set-allow-register").checked,
     http_proxy: $("#set-proxy").value.trim(),
     ai_base_url: $("#set-ai-url").value.trim(),
     ai_model: $("#set-ai-model").value.trim(),
@@ -2052,14 +2195,19 @@ $("#btn-save-settings").addEventListener("click", async () => {
 /* ---------- 启动 ---------- */
 
 async function boot() {
+  if (!(await fetchMe())) { showAuth(); return; }
+  hideAuth();
   loadDirs();
   updateViewBtn();
-  initStatsNav();
-  // 下载页快捷选项跟随设置里的默认值
-  api("/api/config").then((cfg) => {
-    $("#opt-audio").checked = !!cfg.extract_audio;
-    $("#opt-danmaku").checked = !!cfg.download_danmaku;
-  }).catch(() => { /* 忽略 */ });
+  applyRoleNav();
+  // 下载页快捷选项跟随设置里的默认值（admin 可读全局配置，普通用户默认关闭）
+  if (isAdmin()) {
+    api("/api/config").then((cfg) => {
+      $("#opt-audio").checked = !!cfg.extract_audio;
+      $("#opt-danmaku").checked = !!cfg.download_danmaku;
+      $("#opt-subtitle").checked = !!cfg.download_subtitle;
+    }).catch(() => { /* 忽略 */ });
+  }
   // 服务器托管了 Windows 客户端时显示下载入口
   api("/api/app/status").then((s) => {
     if (s.available) {

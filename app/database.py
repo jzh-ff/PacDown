@@ -5,7 +5,7 @@
 """
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import config
@@ -14,8 +14,26 @@ DB_PATH = Path(config.load()["download_dir"]).parent / "data" / "metadata.db"
 _lock = threading.Lock()
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    role TEXT DEFAULT 'user',        -- admin / user
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
 CREATE TABLE IF NOT EXISTS videos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER DEFAULT 0,         -- 归属用户（0=待继承的存量数据）
     platform TEXT NOT NULL,            -- bilibili/douyin/kuaishou/xiaohongshu/generic/...
     video_id TEXT,                     -- 平台内视频唯一 id（BV号/aweme_id/note_id...）
     source_url TEXT NOT NULL,
@@ -35,9 +53,10 @@ CREATE TABLE IF NOT EXISTS videos (
     file_size INTEGER DEFAULT 0,
     audio_path TEXT DEFAULT '',
     danmaku_path TEXT DEFAULT '',
+    subtitle_path TEXT DEFAULT '',
     images TEXT DEFAULT '[]',          -- 图集文件路径 JSON 数组
     raw_json TEXT DEFAULT '{}',        -- 原始完整元数据
-    status TEXT DEFAULT 'pending',     -- pending/parsing/downloading/processing/done/failed
+    status TEXT DEFAULT 'pending',     -- pending/parsing/working/downloading/processing/done/failed
     progress REAL DEFAULT 0,           -- 0~100
     speed TEXT DEFAULT '',
     error TEXT DEFAULT '',
@@ -53,6 +72,7 @@ CREATE INDEX IF NOT EXISTS idx_videos_video_id ON videos(platform, video_id);
 
 CREATE TABLE IF NOT EXISTS subscriptions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER DEFAULT 0,
     platform TEXT NOT NULL,
     uploader_id TEXT NOT NULL,
     uploader_name TEXT DEFAULT '',
@@ -69,6 +89,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 
 CREATE TABLE IF NOT EXISTS reposts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER DEFAULT 0,
     video_id INTEGER NOT NULL,
     style TEXT DEFAULT 'natural',
     credit INTEGER DEFAULT 1,
@@ -81,16 +102,17 @@ CREATE INDEX IF NOT EXISTS idx_reposts_video ON reposts(video_id);
 
 CREATE TABLE IF NOT EXISTS notifications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER DEFAULT 0,
     kind TEXT DEFAULT 'system',        -- subscription / task / system
     title TEXT DEFAULT '',
     body TEXT DEFAULT '',
     read INTEGER DEFAULT 0,
     created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_notif_read ON notifications(read, id);
 
 CREATE TABLE IF NOT EXISTS tool_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER DEFAULT 0,
     kind TEXT NOT NULL,                -- transcode/compress/trim/gif/watermark/frame/img_*
     src TEXT DEFAULT '',               -- 源描述：video:12 / upload:xx.jpg / images:12
     params TEXT DEFAULT '{}',          -- JSON 参数
@@ -118,6 +140,7 @@ CREATE INDEX IF NOT EXISTS idx_visits_ip ON visits(ip);
 
 CREATE TABLE IF NOT EXISTS rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER DEFAULT 0,
     name TEXT DEFAULT '',
     match_type TEXT DEFAULT 'all',     -- all/platform/subscription/tag
     match_value TEXT DEFAULT '',
@@ -155,11 +178,31 @@ def _migrate() -> None:
         ("tags", "ALTER TABLE videos ADD COLUMN tags TEXT DEFAULT '[]'"),
         ("favorite", "ALTER TABLE videos ADD COLUMN favorite INTEGER DEFAULT 0"),
         ("options", "ALTER TABLE subscriptions ADD COLUMN options TEXT DEFAULT '{}'"),
+        # v1.3 多用户：数据表加归属列
+        ("user_id", "ALTER TABLE videos ADD COLUMN user_id INTEGER DEFAULT 0"),
+        ("user_id", "ALTER TABLE subscriptions ADD COLUMN user_id INTEGER DEFAULT 0"),
+        ("user_id", "ALTER TABLE reposts ADD COLUMN user_id INTEGER DEFAULT 0"),
+        ("user_id", "ALTER TABLE notifications ADD COLUMN user_id INTEGER DEFAULT 0"),
+        ("user_id", "ALTER TABLE tool_jobs ADD COLUMN user_id INTEGER DEFAULT 0"),
+        ("user_id", "ALTER TABLE rules ADD COLUMN user_id INTEGER DEFAULT 0"),
+        ("subtitle_path", "ALTER TABLE videos ADD COLUMN subtitle_path TEXT DEFAULT ''"),
     ):
         try:
             execute(ddl)
         except sqlite3.OperationalError:
             pass  # 列已存在
+    # 新列就位后补建索引（老库升级时 SCHEMA 里的建索引会因列缺失失败）
+    for idx in (
+        "CREATE INDEX IF NOT EXISTS idx_videos_user ON videos(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_subs_user ON subscriptions(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, read, id)",
+        "CREATE INDEX IF NOT EXISTS idx_tool_user ON tool_jobs(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_rules_user ON rules(user_id)",
+    ):
+        try:
+            execute(idx)
+        except sqlite3.OperationalError:
+            pass
 
 
 def conn() -> sqlite3.Connection:
@@ -186,10 +229,121 @@ def query_one(sql: str, params: tuple = ()) -> dict | None:
     return rows[0] if rows else None
 
 
+# ---------------- users / sessions（多用户） ----------------
+
+def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
+    import hashlib
+    import secrets
+    salt = salt or secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100_000)
+    return h.hex(), salt
+
+
+def create_user(username: str, password: str, role: str = "user") -> int | None:
+    """创建用户；用户名已存在返回 None。"""
+    h, salt = hash_password(password)
+    cur = execute(
+        "INSERT OR IGNORE INTO users(username, password_hash, salt, role, created_at) "
+        "VALUES(?,?,?,?,?)", (username, h, salt, role, now()))
+    return cur.lastrowid if cur.rowcount else None
+
+
+def verify_user(username: str, password: str) -> dict | None:
+    row = query_one("SELECT * FROM users WHERE username=?", (username,))
+    if not row:
+        return None
+    h, _ = hash_password(password, row["salt"])
+    if h != row["password_hash"]:
+        return None
+    return row
+
+
+def get_user(uid: int) -> dict | None:
+    return query_one("SELECT id, username, role, created_at FROM users WHERE id=?", (uid,))
+
+
+def user_count() -> int:
+    return query_one("SELECT COUNT(*) AS n FROM users")["n"]
+
+
+def update_password(uid: int, password: str) -> None:
+    h, salt = hash_password(password)
+    execute("UPDATE users SET password_hash=?, salt=? WHERE id=?", (h, salt, uid))
+
+
+def create_session(user_id: int, days: int = 30) -> str:
+    import secrets
+    token = secrets.token_hex(32)
+    expires = (datetime.now().replace(microsecond=0)
+               + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    execute("INSERT INTO sessions(token, user_id, created_at, expires_at) VALUES(?,?,?,?)",
+            (token, user_id, now(), expires))
+    return token
+
+
+def session_user(token: str) -> dict | None:
+    if not token:
+        return None
+    row = query_one(
+        "SELECT u.id, u.username, u.role FROM sessions s JOIN users u ON u.id=s.user_id "
+        "WHERE s.token=? AND s.expires_at > datetime('now','localtime')", (token,))
+    return row
+
+
+def delete_session(token: str) -> None:
+    if token:
+        execute("DELETE FROM sessions WHERE token=?", (token,))
+
+
+def restore_from_backup(bak_path: str) -> int:
+    """用备份库覆盖当前库（sqlite backup API，Windows 下无需关闭连接）。
+
+    注意：目标连接 backup 期间不能处于事务中（with conn 会开启事务导致卡死），
+    恢复完成后重置连接对象。
+    """
+    global _conn
+    src = sqlite3.connect(bak_path)
+    try:
+        with _lock:
+            dst = conn()
+            try:
+                dst.commit()  # 结束可能残留的事务
+            except sqlite3.Error:
+                pass
+            dst.execute("PRAGMA busy_timeout=15000")
+            src.backup(dst)
+    finally:
+        src.close()
+    with _lock:
+        try:
+            if _conn is not None:
+                _conn.close()
+        except sqlite3.Error:
+            pass
+        _conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        _conn.row_factory = sqlite3.Row
+    return 0
+
+
+def count_admins() -> int:
+    return query_one("SELECT COUNT(*) AS n FROM users WHERE role='admin'")["n"]
+
+
+def adopt_orphan_data(user_id: int) -> int:
+    """把存量数据（user_id=0 的孤儿记录）继承给首个 admin。"""
+    cur = execute("UPDATE videos SET user_id=? WHERE user_id=0", (user_id,))
+    execute("UPDATE subscriptions SET user_id=? WHERE user_id=0", (user_id,))
+    execute("UPDATE reposts SET user_id=? WHERE user_id=0", (user_id,))
+    execute("UPDATE notifications SET user_id=? WHERE user_id=0", (user_id,))
+    execute("UPDATE tool_jobs SET user_id=? WHERE user_id=0", (user_id,))
+    execute("UPDATE rules SET user_id=? WHERE user_id=0", (user_id,))
+    return cur.rowcount
+
+
 # ---------------- videos ----------------
 
-def insert_video(v: dict) -> int:
-    v = {**v, "created_at": now()}
+def insert_video(v: dict, user_id: int = 0) -> int:
+    v = {**v, "user_id": user_id, "created_at": now()}
     cols = ",".join(v.keys())
     marks = ",".join(["?"] * len(v))
     cur = execute(f"INSERT INTO videos({cols}) VALUES({marks})", tuple(v.values()))
@@ -207,21 +361,23 @@ def get_video(vid: int) -> dict | None:
     return query_one("SELECT * FROM videos WHERE id=?", (vid,))
 
 
-def find_by_video_id(platform: str, video_id: str) -> dict | None:
+def find_by_video_id(platform: str, video_id: str, user_id: int = 0) -> dict | None:
     if not video_id:
         return None
     return query_one(
-        "SELECT * FROM videos WHERE platform=? AND video_id=? AND status IN ('done','downloading','pending') ORDER BY id DESC LIMIT 1",
-        (platform, video_id),
+        "SELECT * FROM videos WHERE platform=? AND video_id=? AND user_id=? "
+        "AND status IN ('done','downloading','pending') ORDER BY id DESC LIMIT 1",
+        (platform, video_id, user_id),
     )
 
 
-def active_tasks() -> list[dict]:
+def active_tasks(user_id: int = 0) -> list[dict]:
     return query(
-        "SELECT * FROM videos WHERE status IN ('pending','parsing','working','downloading','processing')"
+        "SELECT * FROM videos WHERE user_id=? AND ("
+        " status IN ('pending','parsing','working','downloading','processing')"
         " OR (status='duplicate' AND created_at > datetime('now','localtime','-1 minute'))"
         " OR (status='done' AND downloaded_at > datetime('now','localtime','-15 seconds'))"
-        " ORDER BY id DESC"
+        ") ORDER BY id DESC", (user_id,)
     )
 
 
@@ -244,8 +400,8 @@ def claim_task(from_status: str, to_status: str) -> dict | None:
 
 
 def _history_where(platform: str = "", status: str = "", keyword: str = "",
-                   favorite: int = 0, tag: str = "") -> tuple[str, list]:
-    where, params = ["1=1"], []
+                   favorite: int = 0, tag: str = "", user_id: int = 0) -> tuple[str, list]:
+    where, params = ["user_id=?"], [user_id]
     if platform:
         where.append("platform=?")
         params.append(platform)
@@ -265,8 +421,8 @@ def _history_where(platform: str = "", status: str = "", keyword: str = "",
 
 def history(platform: str = "", status: str = "", keyword: str = "",
             page: int = 1, size: int = 24,
-            favorite: int = 0, tag: str = "") -> tuple[list[dict], int]:
-    cond, params = _history_where(platform, status, keyword, favorite, tag)
+            favorite: int = 0, tag: str = "", user_id: int = 0) -> tuple[list[dict], int]:
+    cond, params = _history_where(platform, status, keyword, favorite, tag, user_id)
     total = query_one(f"SELECT COUNT(*) AS n FROM videos WHERE {cond}", tuple(params))["n"]
     rows = query(
         f"SELECT * FROM videos WHERE {cond} ORDER BY id DESC LIMIT ? OFFSET ?",
@@ -277,9 +433,9 @@ def history(platform: str = "", status: str = "", keyword: str = "",
 
 def history_groups(platform: str = "", status: str = "", keyword: str = "",
                    group_by: str = "date", limit: int = 300,
-                   favorite: int = 0, tag: str = "") -> list[dict]:
+                   favorite: int = 0, tag: str = "", user_id: int = 0) -> list[dict]:
     """分组视图：按 下载日期 / 平台 / 作者 分组展示。"""
-    cond, params = _history_where(platform, status, keyword, favorite, tag)
+    cond, params = _history_where(platform, status, keyword, favorite, tag, user_id)
     rows = query(
         f"SELECT * FROM videos WHERE {cond} ORDER BY downloaded_at DESC, id DESC LIMIT ?",
         (*params, limit))
@@ -304,13 +460,16 @@ def history_groups(platform: str = "", status: str = "", keyword: str = "",
     return list(groups.values())
 
 
-def stats() -> dict:
-    total = query_one("SELECT COUNT(*) AS n, COALESCE(SUM(file_size),0) AS size FROM videos WHERE status='done'")
-    today = query_one("SELECT COUNT(*) AS n FROM videos WHERE status='done' AND date(downloaded_at)=date('now','localtime')")
+def stats(user_id: int = 0) -> dict:
+    total = query_one("SELECT COUNT(*) AS n, COALESCE(SUM(file_size),0) AS size FROM videos "
+                      "WHERE status='done' AND user_id=?", (user_id,))
+    today = query_one("SELECT COUNT(*) AS n FROM videos WHERE status='done' AND user_id=?"
+                      " AND date(downloaded_at)=date('now','localtime')", (user_id,))
     by_platform = query(
-        "SELECT platform, COUNT(*) AS n, COALESCE(SUM(file_size),0) AS size FROM videos WHERE status='done' GROUP BY platform ORDER BY n DESC"
-    )
-    failed = query_one("SELECT COUNT(*) AS n FROM videos WHERE status='failed'")
+        "SELECT platform, COUNT(*) AS n, COALESCE(SUM(file_size),0) AS size FROM videos "
+        "WHERE status='done' AND user_id=? GROUP BY platform ORDER BY n DESC", (user_id,))
+    failed = query_one("SELECT COUNT(*) AS n FROM videos WHERE status='failed' AND user_id=?",
+                       (user_id,))
     return {
         "total": total["n"], "total_size": total["size"],
         "today": today["n"], "failed": failed["n"],
@@ -325,12 +484,13 @@ def delete_video(vid: int) -> dict | None:
     return v
 
 
-def list_tags() -> list[str]:
+def list_tags(user_id: int = 0) -> list[str]:
     """聚合全部用户标签（按使用次数降序）。"""
     import json as _json
     from collections import Counter
     counter: Counter = Counter()
-    for r in query("SELECT tags FROM videos WHERE tags NOT IN ('', '[]')"):
+    for r in query("SELECT tags FROM videos WHERE user_id=? AND tags NOT IN ('', '[]')",
+                   (user_id,)):
         try:
             for t in _json.loads(r["tags"] or "[]"):
                 t = str(t).strip()
@@ -343,43 +503,46 @@ def list_tags() -> list[str]:
 
 # ---------------- notifications ----------------
 
-def insert_notification(kind: str, title: str, body: str = "") -> int:
+def insert_notification(user_id: int, kind: str, title: str, body: str = "") -> int:
     cur = execute(
-        "INSERT INTO notifications(kind, title, body, created_at) VALUES(?,?,?,?)",
-        (kind, title, body, now()))
+        "INSERT INTO notifications(user_id, kind, title, body, created_at) VALUES(?,?,?,?,?)",
+        (user_id, kind, title, body, now()))
     return cur.lastrowid
 
 
-def list_notifications(limit: int = 50) -> list[dict]:
-    return query("SELECT * FROM notifications ORDER BY id DESC LIMIT ?", (limit,))
+def list_notifications(user_id: int = 0, limit: int = 50) -> list[dict]:
+    return query("SELECT * FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT ?",
+                 (user_id, limit))
 
 
-def unread_count() -> int:
-    return query_one("SELECT COUNT(*) AS n FROM notifications WHERE read=0")["n"]
+def unread_count(user_id: int = 0) -> int:
+    return query_one("SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND read=0",
+                     (user_id,))["n"]
 
 
-def mark_notifications_read(ids: list[int] | None = None) -> int:
+def mark_notifications_read(user_id: int = 0, ids: list[int] | None = None) -> int:
     if ids:
         marks = ",".join("?" * len(ids))
-        cur = execute(f"UPDATE notifications SET read=1 WHERE id IN ({marks})",
-                      tuple(ids))
+        cur = execute(f"UPDATE notifications SET read=1 WHERE user_id=? AND id IN ({marks})",
+                      (user_id, *ids))
     else:
-        cur = execute("UPDATE notifications SET read=1 WHERE read=0")
+        cur = execute("UPDATE notifications SET read=1 WHERE user_id=? AND read=0",
+                      (user_id,))
     return cur.rowcount
 
 
 # ---------------- subscriptions ----------------
 
-def insert_sub(s: dict) -> int:
-    s = {**s, "created_at": now()}
+def insert_sub(s: dict, user_id: int = 0) -> int:
+    s = {**s, "user_id": user_id, "created_at": now()}
     cols = ",".join(s.keys())
     marks = ",".join(["?"] * len(s))
     cur = execute(f"INSERT OR IGNORE INTO subscriptions({cols}) VALUES({marks})", tuple(s.values()))
     return cur.lastrowid
 
 
-def list_subs() -> list[dict]:
-    return query("SELECT * FROM subscriptions ORDER BY id DESC")
+def list_subs(user_id: int = 0) -> list[dict]:
+    return query("SELECT * FROM subscriptions WHERE user_id=? ORDER BY id DESC", (user_id,))
 
 
 def get_sub(sid: int) -> dict | None:
@@ -398,8 +561,8 @@ def delete_sub(sid: int) -> None:
 
 # ---------------- tool_jobs（工具箱任务） ----------------
 
-def insert_tool_job(j: dict) -> int:
-    j = {**j, "created_at": now()}
+def insert_tool_job(j: dict, user_id: int = 0) -> int:
+    j = {**j, "user_id": user_id, "created_at": now()}
     cols = ",".join(j.keys())
     marks = ",".join(["?"] * len(j))
     cur = execute(f"INSERT INTO tool_jobs({cols}) VALUES({marks})", tuple(j.values()))
@@ -416,8 +579,9 @@ def get_tool_job(jid: int) -> dict | None:
     return query_one("SELECT * FROM tool_jobs WHERE id=?", (jid,))
 
 
-def list_tool_jobs(limit: int = 50) -> list[dict]:
-    return query("SELECT * FROM tool_jobs ORDER BY id DESC LIMIT ?", (limit,))
+def list_tool_jobs(user_id: int = 0, limit: int = 50) -> list[dict]:
+    return query("SELECT * FROM tool_jobs WHERE user_id=? ORDER BY id DESC LIMIT ?",
+                 (user_id, limit))
 
 
 def delete_tool_job(jid: int) -> dict | None:
@@ -527,16 +691,16 @@ def visit_stats(days: int = 30) -> dict:
 
 # ---------------- rules（自动后处理规则） ----------------
 
-def insert_rule(r: dict) -> int:
-    r = {**r, "created_at": now()}
+def insert_rule(r: dict, user_id: int = 0) -> int:
+    r = {**r, "user_id": user_id, "created_at": now()}
     cols = ",".join(r.keys())
     marks = ",".join(["?"] * len(r))
     cur = execute(f"INSERT INTO rules({cols}) VALUES({marks})", tuple(r.values()))
     return cur.lastrowid
 
 
-def list_rules() -> list[dict]:
-    return query("SELECT * FROM rules ORDER BY id DESC")
+def list_rules(user_id: int = 0) -> list[dict]:
+    return query("SELECT * FROM rules WHERE user_id=? ORDER BY id DESC", (user_id,))
 
 
 def get_rule(rid: int) -> dict | None:
@@ -555,16 +719,17 @@ def delete_rule(rid: int) -> None:
 
 # ---------------- reposts（搬运文案） ----------------
 
-def insert_repost(r: dict) -> int:
-    r = {**r, "created_at": now()}
+def insert_repost(r: dict, user_id: int = 0) -> int:
+    r = {**r, "user_id": user_id, "created_at": now()}
     cols = ",".join(r.keys())
     marks = ",".join(["?"] * len(r))
     cur = execute(f"INSERT INTO reposts({cols}) VALUES({marks})", tuple(r.values()))
     return cur.lastrowid
 
 
-def list_reposts(video_id: int | None = None, limit: int = 30) -> list[dict]:
+def list_reposts(video_id: int | None = None, user_id: int = 0, limit: int = 30) -> list[dict]:
     if video_id:
-        return query("SELECT * FROM reposts WHERE video_id=? ORDER BY id DESC LIMIT ?",
-                     (video_id, limit))
-    return query("SELECT * FROM reposts ORDER BY id DESC LIMIT ?", (limit,))
+        return query("SELECT * FROM reposts WHERE video_id=? AND user_id=? "
+                     "ORDER BY id DESC LIMIT ?", (video_id, user_id, limit))
+    return query("SELECT * FROM reposts WHERE user_id=? ORDER BY id DESC LIMIT ?",
+                 (user_id, limit))
