@@ -1900,26 +1900,26 @@ function renderAdminStats(v, d) {
 
   // 图表
   $("#visit-trend-total").textContent = `累计 ${v.total_pv} 次`;
-  $("#chart-visits").innerHTML = areaChart(v.by_day.map((x) => ({ k: x.d, n: x.pv })), "#7c6cf5");
-  $("#chart-hours").innerHTML = barChart(v.by_hour, "#3fd0e0");
+  $("#chart-visits").innerHTML = areaChart(v.by_day.map((x) => ({ k: x.d, n: x.pv })), "#e4a83c");
+  $("#chart-hours").innerHTML = barChart(v.by_hour, "#7fb3c8");
   renderDist("#chart-devices", [
-    ...v.by_device.map((x) => [DEVICE_NAME[x.k] || x.k, x.n, "#7c6cf5"]),
-    ...v.by_os.slice(0, 4).map((x) => [OS_NAME[x.k] || x.k, x.n, "#3b82f6"]),
-    ...v.by_browser.slice(0, 4).map((x) => [BROWSER_NAME[x.k] || x.k, x.n, "#3fd0e0"]),
+    ...v.by_device.map((x) => [DEVICE_NAME[x.k] || x.k, x.n, "#e4a83c"]),
+    ...v.by_os.slice(0, 4).map((x) => [OS_NAME[x.k] || x.k, x.n, "#c98f4e"]),
+    ...v.by_browser.slice(0, 4).map((x) => [BROWSER_NAME[x.k] || x.k, x.n, "#7fb3c8"]),
   ]);
-  renderDist("#chart-referers", v.by_referer.map((x) => [x.k, x.n, "#f0b945"]));
+  renderDist("#chart-referers", v.by_referer.map((x) => [x.k, x.n, "#d99c2b"]));
 
   const dlDays = d.by_day.map((x) => ({ k: x.d, n: x.n }));
   $("#dl-trend-total").textContent = `近30天 ${dlDays.reduce((s, x) => s + x.n, 0)} 个`;
-  $("#chart-downloads").innerHTML = areaChart(dlDays, "#3ecf8e");
-  const PLAT_COLOR = { bilibili: "#fb7299", douyin: "#fe4d6f", kuaishou: "#ff9b3d", xiaohongshu: "#ff5170", direct: "#38bdf8", generic: "#8a95f8" };
+  $("#chart-downloads").innerHTML = areaChart(dlDays, "#4cc38a");
+  const PLAT_COLOR = { bilibili: "#fb7299", douyin: "#fe4d6f", kuaishou: "#ff9b3d", xiaohongshu: "#ff5170", direct: "#7fb3c8", generic: "#9a9da6" };
   $("#chart-platform").innerHTML = donut(d.by_platform.map((x) => ({
-    k: PLATFORM_NAME[x.platform] || x.platform, n: x.n, color: PLAT_COLOR[x.platform] || "#8a95f8",
+    k: PLATFORM_NAME[x.platform] || x.platform, n: x.n, color: PLAT_COLOR[x.platform] || "#7fb3c8",
   })));
-  renderDist("#chart-authors", d.top_authors.map((x) => [x.k, x.n, "#7c6cf5"]));
-  renderDist("#chart-tags", d.top_tags.map((x) => ["#" + x.k, x.n, "#f0b945"]));
-  renderDist("#chart-subs", d.top_subs.map((x) => [`${x.uploader_name}（${PLATFORM_NAME[x.platform] || x.platform}）`, x.new_count, "#3ecf8e"]));
-  renderDist("#chart-tools", d.tool_usage.map((x) => [KIND_CN[x.k] || x.k, x.n, "#3fd0e0"]));
+  renderDist("#chart-authors", d.top_authors.map((x) => [x.k, x.n, "#e4a83c"]));
+  renderDist("#chart-tags", d.top_tags.map((x) => ["#" + x.k, x.n, "#d99c2b"]));
+  renderDist("#chart-subs", d.top_subs.map((x) => [`${x.uploader_name}（${PLATFORM_NAME[x.platform] || x.platform}）`, x.new_count, "#4cc38a"]));
+  renderDist("#chart-tools", d.tool_usage.map((x) => [KIND_CN[x.k] || x.k, x.n, "#7fb3c8"]));
 
   // 明细表
   $("#visit-recent-count").textContent = `最近 ${v.recent.length} 条`;
