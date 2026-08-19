@@ -44,9 +44,17 @@ docker compose build
 echo "==> [5/6] 切换容器"
 docker compose up -d
 
-echo "==> [6/6] 健康检查"
-sleep 5
-if curl -sf -o /dev/null --max-time 10 "$HEALTH_URL"; then
+echo "==> [6/6] 健康检查（最多等 60 秒）"
+ok=""
+for i in $(seq 1 12); do
+  sleep 5
+  if curl -sf -o /dev/null --max-time 10 "$HEALTH_URL"; then
+    ok=1
+    break
+  fi
+  echo "    等待容器就绪… ($((i * 5))s)"
+done
+if [ -n "$ok" ]; then
   echo "✓ 发布成功"
   docker image prune -f >/dev/null 2>&1 || true
   echo "  （回滚命令：docker tag $IMAGE:backup $IMAGE:latest && docker compose up -d）"
